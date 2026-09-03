@@ -65,50 +65,63 @@ def _scan(paths: ToolPaths, serial: str, names: list[str]) -> None:
              "-d", f"file://{DEVICE_DIR}/{n}"], timeout=10)
 
 
+def _push_one(paths: ToolPaths, serial: str, src: Path, dest: str) -> bool:
+    """Push a single file or dir. --sync skips unchanged files (fast re-syncs)."""
+    r = run([paths.adb, "-s", serial, "push", "--sync", str(src), dest], timeout=300)
+    return r["ok"]
+
+
 def push(paths: ToolPaths, serial: str, names: list[str] | None = None) -> dict:
-    """PC -> device. names omitted = whole folder (--sync: only newer files)."""
+    """PC -> device, entry by entry (flat — never nests the folder into itself)."""
     if (e := _check(paths, serial)):
         return e
     if not _online(paths, serial):
         return {"ok": False, "err": f"{serial} is offline"}
     base = shared_dir()
-    if names:
-        pushed = []
-        for n in names:
-            src = base / n
-            if not src.exists():
-                continue
-            r = run([paths.adb, "-s", serial, "push", str(src),
-                     f"{DEVICE_DIR}/{n}"], timeout=180)
-            if r["ok"]:
-                pushed.append(n)
+    targets = [base / n for n in names] if names else sorted(base.iterdir())
+    pushed, failed, skipped = [], [], 0
+    for src in targets:
+        if not src.exists() or src == base:
+            skipped += 1
+            continue
+        dest = f"{DEVICE_DIR}/{src.name}"
+        if _push_one(paths, serial, src, dest):
+            pushed.append(src.name)
+        else:
+            failed.append(src.name)
+    if pushed:
         _scan(paths, serial, pushed)
-        return {"ok": True, "pushed": pushed}
-    r = run([paths.adb, "-s", serial, "push", "--sync", str(base) + "/", DEVICE_DIR + "/"],
-            timeout=600)
-    if r["ok"]:
-        _scan(paths, serial, [p["name"] for p in status()["files"]])
-    return {"ok": r["ok"], "log": (r["out"] + r["err"])[-800:] or "in sync"}
+    out: dict = {"ok": not failed, "pushed": pushed, "skipped": skipped}
+    if failed:
+        out["err"] = f"failed: {', '.join(failed)}"
+    return out
 
 
 def pull(paths: ToolPaths, serial: str, names: list[str] | None = None) -> dict:
-    """Device -> PC."""
+    """Device -> PC, entry by entry (flat — mirrors push)."""
     if (e := _check(paths, serial)):
         return e
     if not _online(paths, serial):
         return {"ok": False, "err": f"{serial} is offline"}
     base = shared_dir()
-    if names:
-        pulled = []
-        for n in names:
-            r = run([paths.adb, "-s", serial, "pull",
-                     f"{DEVICE_DIR}/{n}", str(base / Path(n).name)], timeout=180)
-            if r["ok"]:
-                pulled.append(n)
-        return {"ok": True, "pulled": pulled}
-    r = run([paths.adb, "-s", serial, "pull", DEVICE_DIR + "/", str(base) + "/"],
-            timeout=600)
-    return {"ok": r["ok"], "log": (r["out"] + r["err"])[-800:] or "in sync"}
+    if names is None:
+        dev = list_device(paths, serial)
+        if not dev.get("ok"):
+            return {"ok": False, "err": "could not list device folder"}
+        names = [f for f in dev["files"] if not f.endswith("/")]
+    pulled, failed = [], []
+    for n in names:
+        clean = Path(n).name  # never let device paths escape the shared dir
+        r = run([paths.adb, "-s", serial, "pull",
+                 f"{DEVICE_DIR}/{clean}", str(base / clean)], timeout=300)
+        if r["ok"]:
+            pulled.append(clean)
+        else:
+            failed.append(clean)
+    out: dict = {"ok": not failed, "pulled": pulled}
+    if failed:
+        out["err"] = f"failed: {', '.join(failed)}"
+    return out
 
 
 def list_device(paths: ToolPaths, serial: str) -> dict:
@@ -154,36 +167,72 @@ def reveal() -> dict:
 
 
 # --- auto-sync: mirror both ways every N sec while device is online ---
+def _job_tick(paths: ToolPaths, serial: str, job: dict) -> None:
+    """One mirror pass. Records telemetry so the UI can show what happened."""
+    job["last_run"] = time.time()
+    try:
+        if not _online(paths, serial):
+            job["waiting"] = True
+            job["last_result"] = f"waiting for {serial} (offline)"
+            return
+        job["waiting"] = False
+        pr = push(paths, serial)
+        pl = pull(paths, serial)
+        if pr.get("ok") and pl.get("ok"):
+            job["last_result"] = "synced both ways ✓"
+        else:
+            job["last_result"] = ("push: " + (pr.get("err") or "ok")
+                                  + " · pull: " + (pl.get("err") or "ok"))
+    except Exception as e:
+        job["last_result"] = f"error: {e}"
+
+
 def autosync_set(paths: ToolPaths, serial: str, on: bool, interval: int = 15) -> dict:
-    old = _SYNC_JOBS.pop(serial, None)
+    old = _SYNC_JOBS.pop(serial, None) if serial else None
     if old:
         old["stop"].set()
     if not on:
         return {"ok": True, "autosync": False}
+    if not serial:
+        return {"ok": False,
+                "err": "Pick a device first (Quickboot an AVD) — nothing to sync with."}
     stop = threading.Event()
     interval = max(5, min(int(interval or 15), 300))
+    job = {"stop": stop, "interval": interval, "since": time.time(),
+           "last_run": 0, "last_result": "starting…", "waiting": True}
 
     def _loop():
         while not stop.wait(interval):
-            try:
-                if _online(paths, serial):
-                    push(paths, serial)
-                    pull(paths, serial)
-                else:
-                    pass
-            except Exception:
-                pass
+            _job_tick(paths, serial, job)
             if stop.is_set():
                 break
         _SYNC_JOBS.pop(serial, None)
 
-    _SYNC_JOBS[serial] = {"stop": stop, "interval": interval,
-                          "since": time.time()}
+    _SYNC_JOBS[serial] = job
     threading.Thread(target=_loop, daemon=True).start()
+    state = "online — syncing" if _online(paths, serial) else f"armed, waiting for {serial} to come online"
     return {"ok": True, "autosync": True, "interval": interval,
-            "note": f"Mirroring {shared_dir()} <-> {DEVICE_DIR} every {interval}s while {serial} is online."}
+            "note": f"{state}. PC {shared_dir()} <-> {DEVICE_DIR} every {interval}s."}
 
 
 def autosync_status() -> dict:
-    return {"ok": True, "jobs": {k: {"interval": v["interval"], "since": v["since"]}
-                                 for k, v in _SYNC_JOBS.items()}}
+    return {"ok": True, "jobs": {
+        k: {"interval": v["interval"], "since": v["since"],
+            "last_run": v.get("last_run", 0),
+            "last_result": v.get("last_result", ""),
+            "waiting": v.get("waiting", True)}
+        for k, v in _SYNC_JOBS.items()}}
+
+
+def sync_now(paths: ToolPaths, serial: str) -> dict:
+    """Manual one-shot mirror (the Sync-now button). Loud errors, no silence."""
+    if (e := _check(paths, serial)):
+        return e
+    if not _online(paths, serial):
+        return {"ok": False,
+                "err": f"{serial} is offline — Quickboot the AVD and wait for boot, then Sync."}
+    job: dict = {}
+    _job_tick(paths, serial, job)
+    ok = job.get("last_result") == "synced both ways ✓"
+    return {"ok": ok, "result": job.get("last_result", ""),
+            "pc": str(shared_dir()), "device_dir": DEVICE_DIR}

@@ -60,6 +60,39 @@ class TestShared(unittest.TestCase):
         self.assertFalse(SHARE.pull(PATHS, "")["ok"])
 
 
+class TestSync(unittest.TestCase):
+    def test_autosync_needs_serial(self):
+        r = SHARE.autosync_set(PATHS, "", True)
+        self.assertFalse(r["ok"])
+
+    def test_autosync_off(self):
+        r = SHARE.autosync_set(PATHS, "", False)
+        self.assertTrue(r["ok"] and r["autosync"] is False)
+
+    def test_autosync_arms_when_offline(self):
+        try:
+            r = SHARE.autosync_set(PATHS, "emulator-9999", True, 5)
+            self.assertTrue(r["ok"] and "waiting" in r["note"])
+            st = SHARE.autosync_status()
+            self.assertIn("emulator-9999", st["jobs"])
+            self.assertTrue(st["jobs"]["emulator-9999"]["waiting"])
+        finally:
+            SHARE.autosync_set(PATHS, "emulator-9999", False)
+        self.assertNotIn("emulator-9999", SHARE.autosync_status()["jobs"])
+
+    def test_sync_now_offline_is_loud(self):
+        r = SHARE.sync_now(PATHS, "emulator-9999")
+        self.assertFalse(r["ok"])
+        self.assertIn("offline", r["err"])
+
+    def test_job_tick_telemetry(self):
+        job: dict = {}
+        SHARE._job_tick(PATHS, "emulator-9999", job)
+        self.assertIn("last_run", job)
+        self.assertTrue(job["waiting"])
+        self.assertIn("waiting", job["last_result"])
+
+
 class TestCompat(unittest.TestCase):
     def test_aapt2_present(self):
         self.assertIsNotNone(COMPAT.find_aapt2(PATHS.sdk), "SDK build-tools must ship aapt2")

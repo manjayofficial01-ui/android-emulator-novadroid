@@ -242,6 +242,8 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/shared/autosync":
             return self._json(SHARE.autosync_set(PATHS, b.get("serial", ""),
                                                  bool(b.get("on")), int(b.get("interval", 15))))
+        if path == "/api/shared/sync":
+            return self._json(SHARE.sync_now(PATHS, b.get("serial", "")))
         if path == "/api/shared/reveal":
             return self._json(SHARE.reveal())
         if path == "/api/apk/analyze":

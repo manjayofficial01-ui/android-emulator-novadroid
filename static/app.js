@@ -165,38 +165,102 @@ paintConn(API_BASE() ? 'saved backend → ' + API_BASE() : 'local mode (same ori
 
 /* ---- Shared folder + APK compat ---- */
 const sharedSerial = () => ($('#shared-device')?.value || '').split(' ')[0];
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let autosyncOn = false;
+function needSharedSerial(){
+  const s = sharedSerial();
+  if(!s){ alert('No device picked — Quickboot an AVD first, then select it above.'); return ''; }
+  return s;
+}
+async function safeApi(m, p, b){
+  try{ return await api(m, p, b); }
+  catch(e){ alert('Backend unreachable — is the agent running? (' + e.message + ')'); return {ok:false, err:String(e)}; }
+}
+function fileRow(name, meta, btn){
+  const el = document.createElement('div'); el.className = 'item';
+  el.innerHTML = `<div><div class="name">${esc(name)}</div><div class="meta">${esc(meta)}</div></div><div class="row">${btn}</div>`;
+  return el;
+}
 async function loadShared(){
   try{
     const s = await api('GET','/api/shared');
     $('#shared-path').textContent = s.dir || '';
-    $('#shared-pc').textContent = (s.files||[]).map(f=>`${f.name} (${(f.bytes/1024).toFixed(0)} KB)`).join('\n') || '(empty — drop APKs/photos here)';
+    const pc = $('#shared-pc'); pc.innerHTML = '';
+    (s.files || []).forEach(f => pc.appendChild(fileRow(f.name, (f.bytes/1024).toFixed(0) + ' KB',
+      `<button class="btn small" data-push="${esc(f.name)}">⬆ Import</button>`)));
+    if(!s.files?.length) pc.innerHTML = '<div class="mono">(empty — drop APKs/photos here)</div>';
     const se = sharedSerial();
-    if(se){ const d = await api('GET','/api/shared/device?serial='+encodeURIComponent(se)); $('#shared-dev').textContent = (d.files||[]).join('\n') || d.note || '(empty)'; }
-    else $('#shared-dev').textContent = '(Quickboot a device to see its side)';
-  }catch(e){}
+    const dev = $('#shared-dev'); dev.innerHTML = '';
+    if(se){
+      const d = await api('GET','/api/shared/device?serial=' + encodeURIComponent(se));
+      (d.files || []).forEach(n => dev.appendChild(fileRow(n, 'on device',
+        `<button class="btn small" data-pull="${esc(n)}">⬇ Export</button>`)));
+      if(!d.files?.length) dev.innerHTML = `<div class="mono">${esc(d.note || '(empty)')}</div>`;
+    } else dev.innerHTML = '<div class="mono">(Quickboot a device to see its side)</div>';
+    const st = await api('GET','/api/shared/autosync');
+    const jobs = st.jobs || {}, j = jobs[se];
+    $('#sync-state').textContent = j
+      ? `auto-sync every ${j.interval}s · ${j.waiting ? '⏳ ' : ''}${j.last_result || ''}`
+      : (autosyncOn ? 'auto-sync on · pick a device' : 'auto-sync idle');
+  }catch(e){ /* backend offline — pill already shows it */ }
 }
-$('#btn-reveal').onclick = async()=>{ await api('POST','/api/shared/reveal',{}); };
-$('#btn-push').onclick = async()=>{ const d = await api('POST','/api/shared/push',{serial:sharedSerial()}); alert(d.ok?'Pushed to /sdcard/NovaDroid-Shared ✓':'Push failed: '+(d.err||'')); loadShared(); };
-$('#btn-pull').onclick = async()=>{ const d = await api('POST','/api/shared/pull',{serial:sharedSerial()}); alert(d.ok?'Pulled into shared folder ✓':'Pull failed: '+(d.err||'')); loadShared(); };
+$('#shared-pc').onclick = async e => {
+  const n = e.target?.dataset?.push; if(!n) return;
+  const se = needSharedSerial(); if(!se) return;
+  const d = await safeApi('POST','/api/shared/push',{serial:se, files:[n]});
+  if(d.ok) loadShared(); else alert('Import failed: ' + (d.err || ''));
+};
+$('#shared-dev').onclick = async e => {
+  const n = e.target?.dataset?.pull; if(!n) return;
+  const se = needSharedSerial(); if(!se) return;
+  const d = await safeApi('POST','/api/shared/pull',{serial:se, files:[n]});
+  alert(d.ok ? `Exported ${n} to the desktop folder ✓` : 'Export failed: ' + (d.err || ''));
+  loadShared();
+};
+$('#btn-reveal').onclick = async()=>{ await safeApi('POST','/api/shared/reveal',{}); };
+$('#btn-shared-refresh').onclick = async()=>{ await loadDevices(); await loadShared(); };
+$('#btn-syncnow').onclick = async()=>{
+  const se = needSharedSerial(); if(!se) return;
+  $('#sync-state').textContent = '⇄ syncing…';
+  const d = await safeApi('POST','/api/shared/sync',{serial:se});
+  alert(d.ok ? 'Synced both ways ✓' : 'Sync failed: ' + (d.err || d.result || ''));
+  loadShared();
+};
+$('#btn-push').onclick = async()=>{
+  const se = needSharedSerial(); if(!se) return;
+  const d = await safeApi('POST','/api/shared/push',{serial:se});
+  alert(d.ok ? 'Imported all to /sdcard/NovaDroid-Shared ✓' : 'Import failed: ' + (d.err || ''));
+  loadShared();
+};
+$('#btn-pull').onclick = async()=>{
+  const se = needSharedSerial(); if(!se) return;
+  const d = await safeApi('POST','/api/shared/pull',{serial:se});
+  alert(d.ok ? 'Exported all into shared folder ✓' : 'Export failed: ' + (d.err || ''));
+  loadShared();
+};
 $('#btn-autosync').onclick = async e=>{
-  autosyncOn = !autosyncOn;
-  const d = await api('POST','/api/shared/autosync',{serial:sharedSerial(), on:autosyncOn, interval:15});
+  const se = sharedSerial();
+  if(!autosyncOn && !se){ alert('Pick a device first — auto-sync needs a sync partner.'); return; }
+  const want = !autosyncOn;
+  const d = await safeApi('POST','/api/shared/autosync',{serial:se, on:want, interval:15});
+  if(!d.ok){ alert(d.err || 'failed'); return; }
+  autosyncOn = want;
   e.currentTarget.textContent = autosyncOn ? '🔁 Auto-sync ON' : '🔁 Auto-sync off';
   e.currentTarget.classList.toggle('on', autosyncOn);
-  if(!d.ok){ alert(d.err||'failed'); autosyncOn=false; e.currentTarget.textContent='🔁 Auto-sync off'; e.currentTarget.classList.remove('on'); }
+  loadShared();
 };
 $('#btn-upload').onclick = async()=>{
   const f = $('#up-file').files[0]; if(!f) return alert('Choose a file first');
   const b64 = await new Promise(res=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(',')[1]); r.readAsDataURL(f); });
-  const d = await api('POST','/api/shared/upload',{name:f.name, b64, push_serial:sharedSerial()});
+  const d = await safeApi('POST','/api/shared/upload',{name:f.name, b64, push_serial:sharedSerial()});
+  if(!d.ok){ alert('Upload failed: ' + (d.err || '')); return; }
   alert(d.ok ? `Saved ${d.file} (${(d.bytes/1024).toFixed(0)} KB)${d.pushed?' + pushed to device ✓':''}` : 'Upload failed: '+d.err);
   $('#apk-check').value = $('#apk-check').value || '';
   loadShared();
 };
 $('#btn-analyze').onclick = async()=>{
   let p = $('#apk-check').value.trim(); if(!p) return alert('Enter an APK path');
-  const d = await api('POST','/api/apk/analyze',{apk_path:p, serial:sharedSerial()});
+  const d = await safeApi('POST','/api/apk/analyze',{apk_path:p, serial:sharedSerial()});
   if(!d.ok){ $('#apk-out').textContent = 'ERR: '+d.err; return; }
   $('#apk-out').textContent =
     `${d.apk.label||d.apk.package} ${d.apk.versionName||''}\npackage ${d.apk.package}\nminSdk ${d.apk.minSdk} · target ${d.apk.targetSdk} · native ${d.apk.abis?.length?d.apk.abis.join(', '):'none (pure Java)'}\ndevice: ${d.device.model||d.device.note||d.device.serial} (API ${d.device.sdk||'?'}, bridge ${d.device.bridge||'n/a'})\n\nVERDICT [${d.level}]: ${d.reason}` +
