@@ -44,6 +44,7 @@ BASE = Path(__file__).resolve().parent
 STATIC = BASE / "static"
 PATHS = ToolPaths.discover()
 TOKEN = ""  # set from --token; required for any non-loopback client
+VERSION = "1.2.0"  # shown in dashboard footer — if it looks old, restart the agent
 
 
 def _client_ip(handler: SimpleHTTPRequestHandler) -> str:
@@ -127,7 +128,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write('{"ok": false, "err": "unauthorized - set the backend token in dashboard settings"}'.encode())
             return
         if path == "/api/health":
-            return self._json({"ok": True, "app": "NovaDroid", "version": "1.1.0",
+            return self._json({"ok": True, "app": "NovaDroid", "version": VERSION,
                                "remote": bool(TOKEN)})
         if path == "/api/info":
             acc = ACCEL.accel_status(PATHS)
@@ -136,7 +137,7 @@ class Handler(SimpleHTTPRequestHandler):
                 r = run([PATHS.android_cli, "sdk", "list"], timeout=60)
                 sdk_pkgs = {"raw": (r["out"] or r["err"])[:3000]}
             return self._json({
-                "ok": True,
+                "ok": True, "version": VERSION,
                 "sdk": str(PATHS.sdk) if PATHS.sdk else None,
                 "android_cli": PATHS.android_cli, "adb": PATHS.adb,
                 "emulator": PATHS.emulator, "defaults": DEFAULTS,

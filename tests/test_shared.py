@@ -198,7 +198,7 @@ class TestDeleteBoth(unittest.TestCase):
     def test_pc_only_without_device(self):
         import tempfile
         with tempfile.TemporaryDirectory() as td, TempHome(td):
-            (Path(SHARE.shared_dir()) / "bye.txt").write_text("x", encoding="utf-8")
+            (SHARE.desktop_dir() / "bye.txt").write_text("x", encoding="utf-8")
             r = SHARE.delete_everywhere(PATHS, "", ["bye.txt"])
             self.assertTrue(r["ok"] and r["deleted_pc"] == ["bye.txt"])
             self.assertEqual(r["deleted_device"], [])
@@ -206,14 +206,60 @@ class TestDeleteBoth(unittest.TestCase):
     def test_offline_device_still_deletes_pc(self):
         import tempfile
         with tempfile.TemporaryDirectory() as td, TempHome(td):
-            (Path(SHARE.shared_dir()) / "bye2.txt").write_text("x", encoding="utf-8")
+            (SHARE.desktop_dir() / "bye2.txt").write_text("x", encoding="utf-8")
+            (SHARE.device_mirror_dir() / "bye2.txt").write_text("x", encoding="utf-8")
             r = SHARE.delete_everywhere(PATHS, "emulator-9999", ["bye2.txt"])
             self.assertTrue(r["ok"] and r["deleted_pc"] == ["bye2.txt"])
             self.assertIn("offline", r["device_note"])
+            self.assertFalse((SHARE.device_mirror_dir() / "bye2.txt").exists())
 
     def test_missing_file(self):
         r = SHARE.delete_everywhere(PATHS, "", ["nope.txt"])
         self.assertFalse(r["ok"])
+
+
+class TestTidy(unittest.TestCase):
+    def _root(self, td):
+        SHARE.shared_dir()  # ensure layout
+        return Path(td) / "NovaDroid-Shared"
+
+    def test_stray_filed_to_desktop(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, TempHome(td):
+            root = self._root(td)
+            (root / "stray.apk").write_bytes(b"data")
+            SHARE.shared_dir()
+            self.assertTrue((root / "Desktop" / "stray.apk").exists())
+            self.assertFalse((root / "stray.apk").exists())
+
+    def test_smaller_dupe_deleted_bigger_kept(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, TempHome(td):
+            root = self._root(td)
+            (root / "Desktop" / "f.bin").write_bytes(b"0123456789")
+            (root / "f.bin").write_bytes(b"0123")  # interrupted twin
+            SHARE.shared_dir()
+            self.assertFalse((root / "f.bin").exists())
+            self.assertEqual((root / "Desktop" / "f.bin").stat().st_size, 10)
+
+    def test_bigger_stray_kept_with_suffix(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, TempHome(td):
+            root = self._root(td)
+            (root / "Desktop" / "f.bin").write_bytes(b"01")
+            (root / "f.bin").write_bytes(b"0123456789")
+            SHARE.shared_dir()
+            self.assertTrue((root / "Desktop" / "f (root copy).bin").exists())
+            self.assertEqual((root / "Desktop" / "f.bin").stat().st_size, 2)
+
+    def test_guide_and_folders_untouched(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, TempHome(td):
+            root = self._root(td)
+            SHARE.shared_dir()
+            self.assertTrue((root / SHARE.GUIDE_NAME).exists())
+            self.assertTrue((root / "Desktop").is_dir())
+            self.assertTrue((root / "Device").is_dir())
 
 
 if __name__ == "__main__":

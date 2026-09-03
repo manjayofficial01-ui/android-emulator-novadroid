@@ -17,7 +17,8 @@ async function loadInfo(){
     const d = await api('GET','/api/info');
     $('#health').textContent = d.ok ? '● engine online' : '● engine issue';
     $('#health').className = 'pill ' + (d.ok ? 'ok' : 'bad');
-    $('#sdk').textContent = 'SDK: ' + (d.sdk || 'not found');
+    $('#sdk').textContent = 'SDK: ' + (d.sdk || 'not found') + ' · agent v' + (d.version || '?');
+    $('#agent-v').textContent = d.version || '?';
     $('#info').textContent = JSON.stringify({sdk:d.sdk, adb:!!d.adb, emulator:!!d.emulator, accel:d.accel?.accel, ready:d.accel?.ready}, null, 1);
     const b = $('#accel-banner');
     if(!d.accel?.ready){ b.className='banner warn'; b.innerHTML='⚠ Hardware acceleration not ready — enable <b>Windows Hypervisor Platform</b> + BIOS VT-x/AMD-V. AEHD sunsets Dec 31 2026; WHPX is mandatory. '+(d.accel?.detail||''); }

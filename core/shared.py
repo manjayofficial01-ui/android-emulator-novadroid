@@ -37,16 +37,22 @@ def shared_dir() -> Path:
             "Trash in the dashboard deletes from Desktop + Device + device.\n",
             encoding="utf-8")
         return d
-    # one-time migration from the old flat layout (marker = idempotent)
-    if not (d / ".folders-v2").exists():
-        for p in list(d.iterdir()):
-            if p.is_file() and p.name not in (GUIDE_NAME, ".folders-v2"):
-                try:
-                    p.rename(d / "Desktop" / p.name)
-                except Exception:
-                    pass
+    # Self-healing tidy, EVERY call (not marker-gated): the shared ROOT must
+    # hold only folders + guide. Anything else is a stray — e.g. written by a
+    # pre-1.2 agent whose pull target was the root — and gets filed into
+    # Desktop/. Smaller-or-equal dupes are just deleted (often interrupted
+    # transfers); bigger ones are kept with a suffix, never overwritten.
+    for p in list(d.iterdir()):
+        if not p.is_file() or p.name in (GUIDE_NAME,) or p.name.startswith("."):
+            continue
+        dest = d / "Desktop" / p.name
         try:
-            (d / ".folders-v2").write_text("migrated\n", encoding="utf-8")
+            if dest.exists():
+                if p.stat().st_size <= dest.stat().st_size:
+                    p.unlink()
+                    continue
+                dest = d / "Desktop" / (p.stem + " (root copy)" + p.suffix)
+            p.rename(dest)
         except Exception:
             pass
     return d
