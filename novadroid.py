@@ -106,7 +106,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
 
     def do_GET(self):
@@ -119,6 +120,8 @@ class Handler(SimpleHTTPRequestHandler):
             return super().do_GET()
         if path.startswith("/api/") and not _auth_ok(self):
             self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("WWW-Authenticate", "Bearer")
             self.end_headers()
             self.wfile.write('{"ok": false, "err": "unauthorized - set the backend token in dashboard settings"}'.encode())
@@ -156,6 +159,7 @@ class Handler(SimpleHTTPRequestHandler):
             raw = base64.b64decode(s["png_b64"])
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
