@@ -30,28 +30,44 @@ class TempHome:
 
 
 class TestShared(unittest.TestCase):
-    def test_status_creates_dir(self):
+    def test_status_creates_folders(self):
         import tempfile
         with tempfile.TemporaryDirectory() as td, TempHome(td):
             s = SHARE.status()
             self.assertTrue(s["ok"] and Path(s["dir"]).exists())
+            self.assertTrue((Path(s["dir"]) / "Desktop").is_dir())
+            self.assertTrue((Path(s["dir"]) / "Device").is_dir())
+            self.assertIn("desktop", s)
+            self.assertIn("deviceFolder", s)
             self.assertEqual(s["device_dir"], "/sdcard/NovaDroid-Shared")
 
-    def test_upload_roundtrip(self):
+    def test_migration_moves_loose_files_to_desktop(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, TempHome(td):
+            root = Path(td) / "NovaDroid-Shared"
+            root.mkdir()
+            (root / "loose.apk").write_bytes(b"x")
+            s = SHARE.status()
+            self.assertTrue((root / "Desktop" / "loose.apk").exists())
+            self.assertFalse((root / "loose.apk").exists())
+            self.assertTrue(any(f["name"] == "loose.apk" for f in s["desktop"]))
+
+    def test_upload_goes_to_desktop(self):
         import tempfile
         with tempfile.TemporaryDirectory() as td, TempHome(td):
             raw = b"hello-shared-world" * 100
             r = SHARE.upload("note.txt", base64.b64encode(raw).decode())
-            self.assertTrue(r["ok"] and r["bytes"] == len(raw))
-            self.assertTrue((Path(SHARE.shared_dir()) / "note.txt").exists())
+            self.assertTrue(r["ok"] and r["bytes"] == len(raw)
+                            and r["folder"] == "Desktop")
+            self.assertTrue((Path(SHARE.shared_dir()) / "Desktop" / "note.txt").exists())
 
     def test_upload_rejects(self):
         import tempfile
-        # path traversal is neutralized to a bare file name inside the folder
+        # path traversal is neutralized to a bare file name inside Desktop/
         with tempfile.TemporaryDirectory() as td, TempHome(td):
             r = SHARE.upload("../evil.txt", "eA==")
             self.assertTrue(r["ok"] and r["file"] == "evil.txt")
-            self.assertTrue((Path(SHARE.shared_dir()) / "evil.txt").exists())
+            self.assertTrue((Path(SHARE.shared_dir()) / "Desktop" / "evil.txt").exists())
             self.assertFalse(Path(td, "evil.txt").exists())
         self.assertFalse(SHARE.upload("x.bin", "!!!not-b64!!!")["ok"])
 
@@ -107,7 +123,7 @@ class TestControl(unittest.TestCase):
     def test_delete_pc_confined(self):
         import tempfile
         with tempfile.TemporaryDirectory() as td, TempHome(td):
-            base = SHARE.shared_dir()
+            base = SHARE.desktop_dir()
             (base / "gone.txt").write_text("x", encoding="utf-8")
             r = SHARE.delete_pc(["gone.txt"])
             self.assertTrue(r["ok"] and not (base / "gone.txt").exists())
@@ -116,6 +132,16 @@ class TestControl(unittest.TestCase):
             r2 = SHARE.delete_pc(["../outside.txt", "..", ""])
             self.assertFalse(r2["ok"])
             self.assertTrue(evil.exists(), "must never delete outside the folder")
+
+    def test_delete_everywhere_covers_all_three(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, TempHome(td):
+            (SHARE.desktop_dir() / "x.txt").write_text("x", encoding="utf-8")
+            (SHARE.device_mirror_dir() / "x.txt").write_text("x", encoding="utf-8")
+            r = SHARE.delete_everywhere(PATHS, "", ["x.txt"])  # no device
+            self.assertTrue(r["ok"] and r["deleted_pc"] == ["x.txt"])
+            self.assertFalse((SHARE.desktop_dir() / "x.txt").exists())
+            self.assertFalse((SHARE.device_mirror_dir() / "x.txt").exists())
 
     def test_delete_device_validation(self):
         self.assertFalse(SHARE.delete_device(PATHS, "", ["a"])["ok"])

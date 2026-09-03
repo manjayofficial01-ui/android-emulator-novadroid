@@ -186,17 +186,13 @@ async function loadShared(){
     const s = await api('GET','/api/shared');
     $('#shared-path').textContent = s.dir || '';
     const pc = $('#shared-pc'); pc.innerHTML = '';
-    (s.files || []).forEach(f => pc.appendChild(fileRow(f.name, (f.bytes/1024).toFixed(0) + ' KB',
-      `<button class="btn small" data-push="${esc(f.name)}">⬆ Import</button><button class="btn small danger" data-delpc="${esc(f.name)}">🗑</button>`)));
-    if(!s.files?.length) pc.innerHTML = '<div class="mono">(empty — drop APKs/photos here)</div>';
-    const se = sharedSerial();
+    (s.desktop || s.files || []).forEach(f => pc.appendChild(fileRow(f.name, (f.bytes/1024).toFixed(0) + ' KB',
+      `<button class="btn small" data-push="${esc(f.name)}">⬆ Push</button><button class="btn small danger" data-delpc="${esc(f.name)}">🗑</button>`)));
+    if(!(s.desktop || s.files || []).length) pc.innerHTML = '<div class="mono">(empty — drop files in the Desktop folder to share them)</div>';
     const dev = $('#shared-dev'); dev.innerHTML = '';
-    if(se){
-      const d = await api('GET','/api/shared/device?serial=' + encodeURIComponent(se));
-      (d.files || []).forEach(n => dev.appendChild(fileRow(n, 'on device',
-        `<button class="btn small" data-pull="${esc(n)}">⬇ Export</button><button class="btn small danger" data-deldev="${esc(n)}">🗑</button>`)));
-      if(!d.files?.length) dev.innerHTML = `<div class="mono">${esc(d.note || '(empty)')}</div>`;
-    } else dev.innerHTML = '<div class="mono">(Quickboot a device to see its side)</div>';
+    (s.deviceFolder || []).forEach(f => dev.appendChild(fileRow(f.name, (f.bytes/1024).toFixed(0) + ' KB',
+      `<button class="btn small danger" data-deldev="${esc(f.name)}">🗑</button>`)));
+    if(!(s.deviceFolder || []).length) dev.innerHTML = '<div class="mono">(empty — Pull device to fetch device files here)</div>';
     const st = await api('GET','/api/shared/autosync');
     const jobs = st.jobs || {}, j = jobs[se];
     $('#sync-state').textContent = j
@@ -206,11 +202,11 @@ async function loadShared(){
 }
 async function deleteBoth(name){
   const se = sharedSerial();
-  if(!confirm(`Permanently delete "${name}" from BOTH desktop and device${se ? '' : ' (no device picked — desktop only)'}?`)) return;
+  if(!confirm(`Permanently delete "${name}" from EVERYWHERE (Desktop folder, Device folder${se ? ' and device' : ''})?`)) return;
   const d = await safeApi('POST','/api/shared/delete',{serial:se, files:[name]});
   if(d.ok){
     const dev = d.deleted_device?.length ? `device ✓` : (d.device_note || 'device: n/a');
-    alert(`Deleted "${name}" — desktop ✓, ${dev}. It will NOT come back on sync.`);
+    alert(`Deleted "${name}" — desktop folders ✓, ${dev}. It will NOT come back on sync.`);
   } else alert('Delete failed: ' + (d.err || d.device_note || ''));
   loadShared();
 }
@@ -226,12 +222,7 @@ $('#shared-pc').onclick = async e => {
 };
 $('#shared-dev').onclick = async e => {
   const t = e.target?.dataset || {};
-  if(t.pull){
-    const se = needSharedSerial(); if(!se) return;
-    const d = await safeApi('POST','/api/shared/pull',{serial:se, files:[t.pull]});
-    alert(d.ok ? `Exported ${t.pull} to the desktop folder ✓` : 'Export failed: ' + (d.err || ''));
-    loadShared();
-  } else if(t.deldev){
+  if(t.deldev){
     deleteBoth(t.deldev);
   }
 };
@@ -239,32 +230,29 @@ $('#btn-reveal').onclick = async()=>{ await safeApi('POST','/api/shared/reveal',
 $('#btn-shared-refresh').onclick = async()=>{ await loadDevices(); await loadShared(); };
 $('#btn-syncnow').onclick = async()=>{
   const se = needSharedSerial(); if(!se) return;
-  const mode = $('#sync-mode').value;
-  if(mode !== 'merge' && !confirm(mode === 'push'
-    ? 'Make the DEVICE exactly match the desktop? Extra device files will be DELETED.'
-    : 'Make the DESKTOP exactly match the device? Extra desktop files will be DELETED.')) return;
   $('#sync-state').textContent = '⇄ syncing…';
-  const d = mode === 'merge'
-    ? await safeApi('POST','/api/shared/sync',{serial:se})
-    : await safeApi('POST','/api/shared/mirror',{serial:se, direction:mode});
-  if(mode === 'merge'){
-    alert(d.ok ? 'Synced both ways ✓' : 'Sync failed: ' + (d.err || d.result || ''));
-  } else {
-    const changes = [...(d.deleted_from_device || d.deleted_from_pc || []), ...(d.copied_to_device || d.copied_to_pc || [])];
-    alert(d.ok ? `Mirror ${mode} done ✓${changes.length ? '\n' + changes.join('\n') : '\n(already identical)'}` : 'Mirror failed: ' + (d.err || ''));
-  }
+  const d = await safeApi('POST','/api/shared/sync',{serial:se});
+  alert(d.ok ? 'Synced ✓ — Desktop pushed up, Device folder mirrors down.' : 'Sync failed: ' + (d.err || d.result || ''));
+  loadShared();
+};
+$('#btn-exact').onclick = async()=>{
+  const se = needSharedSerial(); if(!se) return;
+  if(!confirm('Make the DEVICE exactly match the Desktop folder? Files on the device that are not in Desktop/ will be DELETED.')) return;
+  const d = await safeApi('POST','/api/shared/mirror',{serial:se, direction:'push'});
+  const changes = [...(d.deleted_from_device || []), ...(d.copied_to_device || [])];
+  alert(d.ok ? `Device now matches Desktop ✓${changes.length ? '\n' + changes.join('\n') : '\n(already identical)'}` : 'Failed: ' + (d.err || ''));
   loadShared();
 };
 $('#btn-push').onclick = async()=>{
   const se = needSharedSerial(); if(!se) return;
   const d = await safeApi('POST','/api/shared/push',{serial:se});
-  alert(d.ok ? 'Imported all to /sdcard/NovaDroid-Shared ✓' : 'Import failed: ' + (d.err || ''));
+  alert(d.ok ? `Desktop pushed to device ✓ (${(d.pushed || []).length} files)` : 'Push failed: ' + (d.err || ''));
   loadShared();
 };
 $('#btn-pull').onclick = async()=>{
   const se = needSharedSerial(); if(!se) return;
   const d = await safeApi('POST','/api/shared/pull',{serial:se});
-  alert(d.ok ? 'Exported all into shared folder ✓' : 'Export failed: ' + (d.err || ''));
+  alert(d.ok ? `Device folder refreshed ✓ (${(d.pulled || []).length} new, ${(d.skipped || []).length} already had)` : 'Pull failed: ' + (d.err || ''));
   loadShared();
 };
 $('#btn-autosync').onclick = async e=>{

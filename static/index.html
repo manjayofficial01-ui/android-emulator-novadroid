@@ -138,20 +138,16 @@
         <label>📁 PC folder <span id="shared-path" class="mono"></span></label>
         <div class="row"><button id="btn-reveal" class="btn small">📂 Open in Explorer</button>
         <button id="btn-shared-refresh" class="btn small">↻ Refresh</button>
-        <select id="sync-mode" title="Merge never deletes. Exact mirrors delete extras on the target side.">
-          <option value="merge">Merge (never deletes)</option>
-          <option value="push">PC → device (exact)</option>
-          <option value="pull">Device → PC (exact)</option>
-        </select>
         <button id="btn-syncnow" class="btn small primary">⇄ Sync now</button>
+        <button id="btn-exact" class="btn small danger" title="Delete every device file that is not in Desktop/">📲 Device := Desktop</button>
         <button id="btn-autosync" class="btn small toggle">🔁 Auto-sync off</button></div>
         <div class="row"><select id="shared-device"></select><span id="sync-state" class="mono">auto-sync idle</span></div>
         <div class="row two">
-          <div><label>On this PC (⬆ = import · 🗑 = delete BOTH sides)</label><div id="shared-pc" class="list"><div class="mono">—</div></div></div>
-          <div><label>On device /sdcard/NovaDroid-Shared (⬇ = export · 🗑 = delete BOTH sides)</label><div id="shared-dev" class="list"><div class="mono">—</div></div></div>
+          <div><label>📤 Desktop folder — drop files here to share TO device (⬆ push · 🗑 delete everywhere)</label><div id="shared-pc" class="list"><div class="mono">—</div></div></div>
+          <div><label>📥 Device folder — exact copy FROM device (🗑 delete everywhere)</label><div id="shared-dev" class="list"><div class="mono">—</div></div></div>
         </div>
-        <div class="row"><button id="btn-push" class="btn small">⬆ Import all</button>
-        <button id="btn-pull" class="btn small">⬇ Export all</button></div>
+        <div class="row"><button id="btn-push" class="btn small">⬆ Push Desktop</button>
+        <button id="btn-pull" class="btn small">⬇ Pull device</button></div>
         <label>Upload file from browser (lands in shared folder)</label>
         <div class="row"><input id="up-file" type="file"><button id="btn-upload" class="btn">⬆ Upload</button></div>
       </div>
