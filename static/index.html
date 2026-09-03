@@ -138,6 +138,11 @@
         <label>📁 PC folder <span id="shared-path" class="mono"></span></label>
         <div class="row"><button id="btn-reveal" class="btn small">📂 Open in Explorer</button>
         <button id="btn-shared-refresh" class="btn small">↻ Refresh</button>
+        <select id="sync-mode" title="Merge never deletes. Exact mirrors delete extras on the target side.">
+          <option value="merge">Merge (never deletes)</option>
+          <option value="push">PC → device (exact)</option>
+          <option value="pull">Device → PC (exact)</option>
+        </select>
         <button id="btn-syncnow" class="btn small primary">⇄ Sync now</button>
         <button id="btn-autosync" class="btn small toggle">🔁 Auto-sync off</button></div>
         <div class="row"><select id="shared-device"></select><span id="sync-state" class="mono">auto-sync idle</span></div>

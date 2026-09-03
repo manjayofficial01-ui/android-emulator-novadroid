@@ -93,6 +93,51 @@ class TestSync(unittest.TestCase):
         self.assertIn("waiting", job["last_result"])
 
 
+class TestControl(unittest.TestCase):
+    def test_guide_write_once(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, TempHome(td):
+            SHARE.status()
+            g = Path(SHARE.shared_dir()) / SHARE.GUIDE_NAME
+            self.assertTrue(g.exists())
+            g.unlink()  # user deletes it…
+            SHARE.status()  # …it must NOT resurrect (or deletes feel broken)
+            self.assertFalse(g.exists())
+
+    def test_delete_pc_confined(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, TempHome(td):
+            base = SHARE.shared_dir()
+            (base / "gone.txt").write_text("x", encoding="utf-8")
+            r = SHARE.delete_pc(["gone.txt"])
+            self.assertTrue(r["ok"] and not (base / "gone.txt").exists())
+            evil = Path(td) / "outside.txt"
+            evil.write_text("keep", encoding="utf-8")
+            r2 = SHARE.delete_pc(["../outside.txt", "..", ""])
+            self.assertFalse(r2["ok"])
+            self.assertTrue(evil.exists(), "must never delete outside the folder")
+
+    def test_delete_device_validation(self):
+        self.assertFalse(SHARE.delete_device(PATHS, "", ["a"])["ok"])
+        r = SHARE.delete_device(PATHS, "emulator-9999", ["../x", "a/b", ""])
+        self.assertFalse(r["ok"])  # offline device; traversal never reaches adb
+
+    def test_mirror_validation(self):
+        self.assertFalse(SHARE.mirror(PATHS, "", "push")["ok"])
+        r = SHARE.mirror(PATHS, "emulator-9999", "sideways")
+        self.assertFalse(r["ok"])
+        r2 = SHARE.mirror(PATHS, "emulator-9999", "push")
+        self.assertFalse(r2["ok"] and "offline" in r2["err"])
+
+    def test_dev_name_rules(self):
+        self.assertEqual(SHARE._dev_name("My Video.mp4"), "My Video.mp4")  # spaces OK
+        self.assertEqual(SHARE._dev_name("Put APKs, photos & files here.txt"),
+                         "Put APKs, photos & files here.txt")  # & OK inside quotes
+        for bad in ["a/b", "..", "", "it's", "a\nb"]:
+            self.assertIsNone(SHARE._dev_name(bad), bad)
+        self.assertEqual(SHARE._q("/sdcard/d/a b.txt"), "'/sdcard/d/a b.txt'")
+
+
 class TestCompat(unittest.TestCase):
     def test_aapt2_present(self):
         self.assertIsNotNone(COMPAT.find_aapt2(PATHS.sdk), "SDK build-tools must ship aapt2")

@@ -187,14 +187,14 @@ async function loadShared(){
     $('#shared-path').textContent = s.dir || '';
     const pc = $('#shared-pc'); pc.innerHTML = '';
     (s.files || []).forEach(f => pc.appendChild(fileRow(f.name, (f.bytes/1024).toFixed(0) + ' KB',
-      `<button class="btn small" data-push="${esc(f.name)}">⬆ Import</button>`)));
+      `<button class="btn small" data-push="${esc(f.name)}">⬆ Import</button><button class="btn small danger" data-delpc="${esc(f.name)}">🗑</button>`)));
     if(!s.files?.length) pc.innerHTML = '<div class="mono">(empty — drop APKs/photos here)</div>';
     const se = sharedSerial();
     const dev = $('#shared-dev'); dev.innerHTML = '';
     if(se){
       const d = await api('GET','/api/shared/device?serial=' + encodeURIComponent(se));
       (d.files || []).forEach(n => dev.appendChild(fileRow(n, 'on device',
-        `<button class="btn small" data-pull="${esc(n)}">⬇ Export</button>`)));
+        `<button class="btn small" data-pull="${esc(n)}">⬇ Export</button><button class="btn small danger" data-deldev="${esc(n)}">🗑</button>`)));
       if(!d.files?.length) dev.innerHTML = `<div class="mono">${esc(d.note || '(empty)')}</div>`;
     } else dev.innerHTML = '<div class="mono">(Quickboot a device to see its side)</div>';
     const st = await api('GET','/api/shared/autosync');
@@ -205,25 +205,49 @@ async function loadShared(){
   }catch(e){ /* backend offline — pill already shows it */ }
 }
 $('#shared-pc').onclick = async e => {
-  const n = e.target?.dataset?.push; if(!n) return;
-  const se = needSharedSerial(); if(!se) return;
-  const d = await safeApi('POST','/api/shared/push',{serial:se, files:[n]});
-  if(d.ok) loadShared(); else alert('Import failed: ' + (d.err || ''));
+  const t = e.target?.dataset || {};
+  if(t.push){
+    const se = needSharedSerial(); if(!se) return;
+    const d = await safeApi('POST','/api/shared/push',{serial:se, files:[t.push]});
+    if(d.ok) loadShared(); else alert('Import failed: ' + (d.err || ''));
+  } else if(t.delpc){
+    if(!confirm(`Permanently delete "${t.delpc}" from the desktop folder?`)) return;
+    const d = await safeApi('POST','/api/shared/delete-pc',{files:[t.delpc]});
+    if(d.ok) loadShared(); else alert('Delete failed: ' + (d.err || ''));
+  }
 };
 $('#shared-dev').onclick = async e => {
-  const n = e.target?.dataset?.pull; if(!n) return;
-  const se = needSharedSerial(); if(!se) return;
-  const d = await safeApi('POST','/api/shared/pull',{serial:se, files:[n]});
-  alert(d.ok ? `Exported ${n} to the desktop folder ✓` : 'Export failed: ' + (d.err || ''));
-  loadShared();
+  const t = e.target?.dataset || {};
+  if(t.pull){
+    const se = needSharedSerial(); if(!se) return;
+    const d = await safeApi('POST','/api/shared/pull',{serial:se, files:[t.pull]});
+    alert(d.ok ? `Exported ${t.pull} to the desktop folder ✓` : 'Export failed: ' + (d.err || ''));
+    loadShared();
+  } else if(t.deldev){
+    const se = needSharedSerial(); if(!se) return;
+    if(!confirm(`Permanently delete "${t.deldev}" from the device?`)) return;
+    const d = await safeApi('POST','/api/shared/delete-device',{serial:se, files:[t.deldev]});
+    if(d.ok) loadShared(); else alert('Delete failed: ' + (d.err || ''));
+  }
 };
 $('#btn-reveal').onclick = async()=>{ await safeApi('POST','/api/shared/reveal',{}); };
 $('#btn-shared-refresh').onclick = async()=>{ await loadDevices(); await loadShared(); };
 $('#btn-syncnow').onclick = async()=>{
   const se = needSharedSerial(); if(!se) return;
+  const mode = $('#sync-mode').value;
+  if(mode !== 'merge' && !confirm(mode === 'push'
+    ? 'Make the DEVICE exactly match the desktop? Extra device files will be DELETED.'
+    : 'Make the DESKTOP exactly match the device? Extra desktop files will be DELETED.')) return;
   $('#sync-state').textContent = '⇄ syncing…';
-  const d = await safeApi('POST','/api/shared/sync',{serial:se});
-  alert(d.ok ? 'Synced both ways ✓' : 'Sync failed: ' + (d.err || d.result || ''));
+  const d = mode === 'merge'
+    ? await safeApi('POST','/api/shared/sync',{serial:se})
+    : await safeApi('POST','/api/shared/mirror',{serial:se, direction:mode});
+  if(mode === 'merge'){
+    alert(d.ok ? 'Synced both ways ✓' : 'Sync failed: ' + (d.err || d.result || ''));
+  } else {
+    const changes = [...(d.deleted_from_device || d.deleted_from_pc || []), ...(d.copied_to_device || d.copied_to_pc || [])];
+    alert(d.ok ? `Mirror ${mode} done ✓${changes.length ? '\n' + changes.join('\n') : '\n(already identical)'}` : 'Mirror failed: ' + (d.err || ''));
+  }
   loadShared();
 };
 $('#btn-push').onclick = async()=>{

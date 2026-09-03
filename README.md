@@ -41,7 +41,7 @@ Requirements: Python 3.10+, Android SDK with `emulator` + `platform-tools` + an 
 | GPS presets, battery, guarded shell, guest perf | ✅ | adb spelunking |
 | Tablet & display (presets, live `wm` resize, orientation, skins) | ✅ one-tap, no reboot | manual `wm` + config edits |
 | Off-screen window rescue (saved-pos reset + live move) | ✅ ⌖ Fix window | hand-edit ini / unreachable title bar |
-| Shared folder PC ↔ emulator (APKs, photos, files) | ✅ per-file Export/Import, Sync-now, Refresh, auto-sync with status | manual `adb push/pull` |
+| Shared folder PC ↔ emulator (APKs, photos, files) | ✅ per-file Export/Import/Delete, Sync-now, exact mirrors either way, Refresh, auto-sync status | manual `adb push/pull` |
 | APK compatibility check (aapt2 + ARM-translation verdict) | ✅ Analyze before install | blind install |
 | WHPX readiness + AEHD-sunset guidance | ✅ banner | `emulator-check` raw |
 

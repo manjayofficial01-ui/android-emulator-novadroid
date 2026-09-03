@@ -244,6 +244,12 @@ class Handler(SimpleHTTPRequestHandler):
                                                  bool(b.get("on")), int(b.get("interval", 15))))
         if path == "/api/shared/sync":
             return self._json(SHARE.sync_now(PATHS, b.get("serial", "")))
+        if path == "/api/shared/mirror":
+            return self._json(SHARE.mirror(PATHS, b.get("serial", ""), b.get("direction", "")))
+        if path == "/api/shared/delete-pc":
+            return self._json(SHARE.delete_pc(b.get("files", [])))
+        if path == "/api/shared/delete-device":
+            return self._json(SHARE.delete_device(PATHS, b.get("serial", ""), b.get("files", [])))
         if path == "/api/shared/reveal":
             return self._json(SHARE.reveal())
         if path == "/api/apk/analyze":
