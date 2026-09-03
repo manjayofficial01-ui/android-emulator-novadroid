@@ -1,0 +1,12 @@
+# Only the static dashboard ships to Vercel. The Python agent, SDK
+# tooling, tests and docs stay on the PC (the emulator lives there).
+*.py
+*.pyc
+__pycache__/
+core/
+tests/
+scripts/
+*.md
+*.bat
+requirements.txt
+.vercel/

@@ -1,0 +1,3 @@
+# NovaDroid is stdlib-only by design (no pip bloat, no Electron).
+# Python >= 3.10 + Android SDK + `android` CLI on PATH is all you need.
+# Nothing to install. This file exists so pip users see intent.

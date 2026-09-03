@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NovaDroid — Android Emulator for Windows</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">◈</span> NovaDroid <span class="tag">for Windows</span></div>
+  <div class="top-actions">
+    <span id="health" class="pill">● connecting…</span>
+    <button id="btn-refresh" class="btn small">↻ Refresh all</button>
+  </div>
+</header>
+
+<div id="accel-banner" class="banner hidden"></div>
+
+<div class="connbar">
+  <span class="conn-label">🔌 Backend</span>
+  <input id="cfg-api" placeholder="same origin (local) or https://&lt;tunnel&gt;.trycloudflare.com">
+  <input id="cfg-tok" type="password" placeholder="token (required for remote)">
+  <button id="btn-conn" class="btn small primary">Connect</button>
+  <span id="conn-state" class="mono">local mode</span>
+</div>
+
+<main class="grid">
+  <!-- LEFT: fleet -->
+  <section class="card">
+    <h2>Virtual Devices <span class="sub">QEMU · ranchu · gfxstream · WHPX</span></h2>
+    <div class="row">
+      <select id="profile"></select>
+      <button id="btn-create" class="btn primary">＋ Create AVD</button>
+    </div>
+    <div id="avds" class="list"></div>
+    <h3>Advanced launch <span class="sub">raw emulator flags</span></h3>
+    <div class="row">
+      <input id="raw-name" placeholder="AVD name">
+      <input id="raw-flags" placeholder="-gpu host -cores 4 -memory 4096">
+      <button id="btn-raw" class="btn">▶ Raw boot</button>
+    </div>
+    <p class="hint">GPU: <code>host</code> · <code>swiftshader_indirect</code> · <code>lavapipe</code> · <code>angle</code> &nbsp;|&nbsp; Try <code>-feature VulkanNativeSwapchain</code> on XR/new images. Snapshots break under Vulkan — add <code>-no-snapshot</code> then.</p>
+  </section>
+
+  <!-- MID: devices + screen -->
+  <section class="card">
+    <h2>Running devices <span class="sub">ADB · delta-install · WebRTC-class screen</span></h2>
+    <div id="devices" class="list"></div>
+    <div class="screen-wrap">
+      <div class="row">
+        <select id="shot-device"></select>
+        <button id="btn-shot" class="btn">📷 Screenshot</button>
+        <button id="btn-live" class="btn toggle">▶ Live (3s)</button>
+      </div>
+      <img id="screen" alt="device screen appears here">
+      <div class="row">
+        <button class="btn small" data-key="3">⌂ Home</button>
+        <button class="btn small" data-key="4">← Back</button>
+        <button class="btn small" data-key="187">▦ Recent</button>
+        <button id="btn-uia" class="btn small">⧉ Layout</button>
+      </div>
+      <pre id="layout" class="mono hidden"></pre>
+    </div>
+  </section>
+
+  <!-- RIGHT: ops -->
+  <section class="card">
+    <h2>App &amp; World Ops</h2>
+    <label>APK install (drag-drop path or browse)</label>
+    <div class="row">
+      <input id="apk" placeholder="C:\path\to\app.apk">
+      <button id="btn-apk" class="btn primary">⬆ Install</button>
+    </div>
+    <div class="row two">
+      <div>
+        <label>GPS fix</label>
+        <div class="row"><input id="lat" value="27.7172"><input id="lng" value="85.3240">
+        <button id="btn-geo" class="btn">📍 Set</button></div>
+        <div class="row quick">
+          <button class="btn small geo" data-lat="27.7172" data-lng="85.3240">KTM</button>
+          <button class="btn small geo" data-lat="40.7128" data-lng="-74.0060">NYC</button>
+          <button class="btn small geo" data-lat="35.6762" data-lng="139.6503">TYO</button>
+          <button class="btn small geo" data-lat="51.5074" data-lng="-0.1278">LDN</button>
+        </div>
+      </div>
+      <div>
+        <label>Battery</label>
+        <div class="row"><input id="batt" type="number" value="85" min="0" max="100">
+        <button id="btn-batt" class="btn">🔋 Set</button></div>
+      </div>
+    </div>
+    <label>ADB shell (guarded)</label>
+    <div class="row"><input id="shell" placeholder="getprop ro.build.version.release"><button id="btn-shell" class="btn">❯ Run</button></div>
+    <pre id="shell-out" class="mono"></pre>
+    <label>Performance (guest)</label>
+    <div class="row"><button id="btn-perf" class="btn">⚡ Sample</button><span id="perf" class="mono"></span></div>
+    <pre id="perf-out" class="mono"></pre>
+  </section>
+
+  <!-- TABLET & DISPLAY -->
+  <section class="card wide">
+    <h2>Tablet &amp; Display <span class="sub">live resize via wm · no reboot · Pixel Tablet frame pre-installed</span></h2>
+    <div class="row two">
+      <div>
+        <label>Target device</label>
+        <div class="row"><select id="disp-device"></select><button id="btn-disp-get" class="btn small">⌖ Read current</button></div>
+        <pre id="disp-cur" class="mono">current display appears here</pre>
+        <label>One-tap tablet presets (live)</label>
+        <div id="presets" class="row"></div>
+        <label>Custom resolution (w × h @ dpi)</label>
+        <div class="row"><input id="dw" value="2560"><input id="dh" value="1600"><input id="ddpi" value="276">
+        <button id="btn-disp-apply" class="btn primary">▣ Apply live</button></div>
+        <div class="row"><button id="btn-disp-reset" class="btn small">↩ Reset to AVD default</button>
+        <button id="btn-disp-save" class="btn small">💾 Save to AVD (survives reboot)</button></div>
+      </div>
+      <div>
+        <label>Orientation</label>
+        <div class="row quick">
+          <button class="btn small ori" data-mode="portrait">📱 Portrait</button>
+          <button class="btn small ori" data-mode="landscape">📺 Landscape</button>
+          <button class="btn small ori" data-mode="seascape">🔄 Seascape</button>
+          <button class="btn small ori" data-mode="auto">🌀 Auto-rotate</button>
+        </div>
+        <label>Device frame (skin — AVD must be stopped)</label>
+        <div class="row"><select id="skin"></select><button id="btn-skin" class="btn">🖼 Apply frame</button></div>
+        <div id="skins-note" class="mono"></div>
+        <p class="hint">Live resize uses <code>wm size/density</code> — instant, ideal for testing tablet layouts on the running <code>medium_tablet</code> AVD. Save-to-AVD writes <code>hw.lcd.*</code> into <code>config.ini</code> for the next boot.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- SHARED FOLDER + APK COMPAT -->
+  <section class="card wide">
+    <h2>Shared Folder &amp; APK Compatibility <span class="sub">one folder for PC + emulator · ARM phone APKs OK via translation</span></h2>
+    <div class="row two">
+      <div>
+        <label>📁 PC folder <span id="shared-path" class="mono"></span></label>
+        <div class="row"><button id="btn-reveal" class="btn small">📂 Open in Explorer</button>
+        <button id="btn-push" class="btn small primary">⬆ PC → device</button>
+        <button id="btn-pull" class="btn small">⬇ Device → PC</button>
+        <button id="btn-autosync" class="btn small toggle">🔁 Auto-sync off</button></div>
+        <div class="row"><select id="shared-device"></select></div>
+        <div class="row two">
+          <div><label>On this PC</label><pre id="shared-pc" class="mono">—</pre></div>
+          <div><label>On device (/sdcard/NovaDroid-Shared)</label><pre id="shared-dev" class="mono">—</pre></div>
+        </div>
+        <label>Upload file from browser (lands in shared folder)</label>
+        <div class="row"><input id="up-file" type="file"><button id="btn-upload" class="btn">⬆ Upload</button></div>
+      </div>
+      <div>
+        <label>APK check — will this phone APK run here?</label>
+        <div class="row"><input id="apk-check" placeholder="C:\path\to\app.apk (or drop it in the shared folder first)"><button id="btn-analyze" class="btn primary">🔍 Analyze</button></div>
+        <pre id="apk-out" class="mono">Drop any smartphone APK in the shared folder, type its path, Analyze — then Install.</pre>
+        <p class="hint">Pure-Java apps always run · x86/ARM native runs directly or <b>via ARM translation</b> shipped in the Play x86_64 image · installs bypass "unknown sources" · only banking apps with hardware attestation may refuse (true on every emulator).</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- BOTTOM: macros + sync -->
+  <section class="card wide">
+    <h2>Automation <span class="sub">Nox/LDPlayer-class macros + multi-instance synchronizer</span></h2>
+    <div class="row two">
+      <div>
+        <label>Macro recorder (click steps run on target device)</label>
+        <div class="row"><input id="macro-name" placeholder="farm-daily"><button id="btn-macro-save" class="btn">💾 Save demo macro</button><button id="btn-macro-run" class="btn primary">▶ Run</button></div>
+        <div class="row"><button class="btn small" data-macro='{"type":"tap","x":540,"y":1600}'>＋Tap</button>
+        <button class="btn small" data-macro='{"type":"swipe","x1":540,"y1":1400,"x2":540,"y2":400,"ms":400}'>＋Swipe↑</button>
+        <button class="btn small" data-macro='{"type":"key","code":3}'>＋Home</button>
+        <button class="btn small" data-macro='{"type":"sleep","s":2}'>＋Wait2s</button>
+        <button id="btn-macro-clear" class="btn small">✕ Clear</button></div>
+        <pre id="macro-steps" class="mono">[]</pre>
+        <div id="macros" class="mono"></div>
+      </div>
+      <div>
+        <label>Operation synchronizer — mirror one tap to ALL devices</label>
+        <div class="row"><input id="sync-x" value="540"><input id="sync-y" value="1200"><button id="btn-sync" class="btn primary">⛓ Sync-tap all</button></div>
+        <pre id="sync-out" class="mono"></pre>
+        <h3>System</h3>
+        <pre id="info" class="mono"></pre>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>Engine: Google Android Emulator (QEMU ranchu · gfxstream · WHPX) · Manager: NovaDroid 1.0 · No ads · Android 16/17 images · <span id="sdk"></span></footer>
+<script src="/app.js"></script>
+</body>
+</html>
