@@ -10,8 +10,10 @@ Presets mirror real best-selling tablets so UI/layout QA matches hardware.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
+from . import inifile
 from .config import ToolPaths
 from .runner import run
 
@@ -36,6 +38,8 @@ PHONE_PRESETS = [
      "w": 1080, "h": 2424, "dpi": 420, "note": "Baseline phone"},
     {"id": "pixel_9pro_xl_68", "label": "Pixel 9 Pro XL 6.8\"",
      "w": 1344, "h": 2992, "dpi": 490, "note": "Tall flagship"},
+    {"id": "pixel_fold_open", "label": "Pixel Fold (open)",
+     "w": 2208, "h": 1840, "dpi": 380, "note": "Foldable inner screen"},
 ]
 
 # rotation: 0 portrait, 1 landscape, 2 reverse-portrait, 3 seascape
@@ -56,17 +60,6 @@ def _check(paths: ToolPaths, serial: str) -> dict | None:
     return None
 
 
-def get_display(paths: ToolPaths, serial: str) -> dict:
-    if (e := _check(paths, serial)):
-        return e
-    size = run([paths.adb, "-s", serial, "shell", "wm", "size"], timeout=15)
-    dens = run([paths.adb, "-s", serial, "shell", "wm", "density"], timeout=15)
-    rot = run([paths.adb, "-s", serial, "shell",
-               "settings", "get", "system", "user_rotation"], timeout=10)
-    return {"ok": True, "size": size["out"][:200],
-            "density": dens["out"][:200], "rotation": rot["out"][:50]}
-
-
 def _validate(w: int, h: int, dpi: int) -> str | None:
     if not (320 <= w <= 7680 and 320 <= h <= 7680):
         return "width/height must each be 320–7680px"
@@ -75,20 +68,87 @@ def _validate(w: int, h: int, dpi: int) -> str | None:
     return None
 
 
+def _ints(w, h, dpi) -> tuple[int, int, int] | str:
+    try:
+        return int(w), int(h), int(dpi)
+    except (TypeError, ValueError):
+        return "w/h/dpi must be integers"
+
+
+# --------------------------------------------------------------------------
+# Read
+# --------------------------------------------------------------------------
+def get_display(paths: ToolPaths, serial: str) -> dict:
+    if (e := _check(paths, serial)):
+        return e
+    # One round-trip instead of three: each `adb shell` costs ~150ms, which
+    # the dashboard pays on every interactive-tap coordinate mapping.
+    r = run([paths.adb, "-s", serial, "shell",
+             "wm size; echo ---; wm density; echo ---; "
+             "settings get system user_rotation; echo ---; "
+             "settings get system accelerometer_rotation"], timeout=20)
+    parts = r["out"].split("---")
+    size = parts[0].strip() if parts else ""
+    dens = parts[1].strip() if len(parts) > 1 else ""
+    rot = parts[2].strip() if len(parts) > 2 else ""
+    auto = parts[3].strip() if len(parts) > 3 else ""
+    w, h = parse_wm_size(size)
+    return {"ok": True, "size": size[:200], "density": dens[:200],
+            "rotation": rot[:50], "auto_rotate": auto == "1",
+            "w": w, "h": h, "dpi": parse_wm_density(dens)}
+
+
+def parse_wm_size(text: str) -> tuple[int, int]:
+    """Extract the *effective* size from `wm size` output.
+
+    `wm size` prints both, and the override is what apps actually see:
+        Physical size: 1080x2424
+        Override size: 2560x1600
+    """
+    override = re.search(r"Override size:\s*(\d+)x(\d+)", text or "")
+    if override:
+        return int(override.group(1)), int(override.group(2))
+    physical = re.search(r"Physical size:\s*(\d+)x(\d+)", text or "")
+    if physical:
+        return int(physical.group(1)), int(physical.group(2))
+    bare = re.search(r"(\d{3,5})x(\d{3,5})", text or "")
+    return (int(bare.group(1)), int(bare.group(2))) if bare else (0, 0)
+
+
+def parse_wm_density(text: str) -> int:
+    m = re.search(r"Override density:\s*(\d+)", text or "")
+    if m:
+        return int(m.group(1))
+    m = re.search(r"Physical density:\s*(\d+)", text or "")
+    return int(m.group(1)) if m else 0
+
+
+def size_tuple(paths: ToolPaths, serial: str) -> tuple[int, int]:
+    """(w, h) the device is currently rendering at."""
+    if (e := _check(paths, serial)):
+        return (0, 0)
+    r = run([paths.adb, "-s", serial, "shell", "wm size"], timeout=15)
+    return parse_wm_size(r["out"])
+
+
+# --------------------------------------------------------------------------
+# Live (no reboot)
+# --------------------------------------------------------------------------
 def apply_display(paths: ToolPaths, serial: str, w: int, h: int, dpi: int) -> dict:
     """Live resize — no reboot. Mirrors Genymotion's runtime resolution switch."""
     if (e := _check(paths, serial)):
         return e
-    try:
-        w, h, dpi = int(w), int(h), int(dpi)
-    except (TypeError, ValueError):
-        return {"ok": False, "err": "w/h/dpi must be integers"}
+    parsed = _ints(w, h, dpi)
+    if isinstance(parsed, str):
+        return {"ok": False, "err": parsed}
+    w, h, dpi = parsed
     if (err := _validate(w, h, dpi)):
         return {"ok": False, "err": err}
     r1 = run([paths.adb, "-s", serial, "shell", "wm", "size", f"{w}x{h}"], timeout=15)
     r2 = run([paths.adb, "-s", serial, "shell", "wm", "density", str(dpi)], timeout=15)
     ok = r1["ok"] and r2["ok"]
-    return {"ok": ok, "size": r1["out"][:200] or r1["err"][-200:],
+    return {"ok": ok, "w": w, "h": h, "dpi": dpi,
+            "size": r1["out"][:200] or r1["err"][-200:],
             "density": r2["out"][:200] or r2["err"][-200:],
             "note": "Live only — use Save-to-AVD to survive reboot."}
 
@@ -120,30 +180,27 @@ def set_orientation(paths: ToolPaths, serial: str, mode: str) -> dict:
             "note": "If the app forces orientation, this only affects launcher/system UI."}
 
 
+# --------------------------------------------------------------------------
+# Persisted (AVD must be stopped)
+# --------------------------------------------------------------------------
 def save_to_avd(name: str, w: int, h: int, dpi: int) -> dict:
     """Persist resolution into AVD config.ini. AVD must be STOPPED."""
-    try:
-        w, h, dpi = int(w), int(h), int(dpi)
-    except (TypeError, ValueError):
-        return {"ok": False, "err": "w/h/dpi must be integers"}
+    parsed = _ints(w, h, dpi)
+    if isinstance(parsed, str):
+        return {"ok": False, "err": parsed}
+    w, h, dpi = parsed
     if (err := _validate(w, h, dpi)):
         return {"ok": False, "err": err}
-    cfg = Path.home() / ".android" / "avd" / f"{name}.avd" / "config.ini"
+    if not re.fullmatch(r"[\w.\-]+", name or ""):
+        return {"ok": False, "err": "invalid AVD name"}
+    cfg = (Path.home() / ".android" / "avd" / f"{name}.avd" / "config.ini")
     if not cfg.exists():
         return {"ok": False, "err": f"AVD not found: {name}"}
-    kv = {"hw.lcd.width": str(w), "hw.lcd.height": str(h), "hw.lcd.density": str(dpi)}
-    lines, seen = [], set()
-    for line in cfg.read_text(encoding="utf-8", errors="ignore").splitlines():
-        if "=" in line and line.split("=", 1)[0].strip() in kv:
-            k = line.split("=", 1)[0].strip()
-            lines.append(f"{k}={kv[k]}")
-            seen.add(k)
-        else:
-            lines.append(line)
-    for k, v in kv.items():
-        if k not in seen:
-            lines.append(f"{k}={v}")
-    cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        inifile.upsert(cfg, {"hw.lcd.width": str(w), "hw.lcd.height": str(h),
+                             "hw.lcd.density": str(dpi)})
+    except OSError as e:
+        return {"ok": False, "err": f"could not write config.ini: {e}"}
     return {"ok": True, "avd": name, "display": f"{w}x{h} @ {dpi}dpi",
             "note": "Takes effect on next (cold or quick) boot. Stop the AVD first."}
 
@@ -161,24 +218,18 @@ def list_skins(paths: ToolPaths) -> dict:
 
 def set_skin(paths: ToolPaths, name: str, skin: str) -> dict:
     """Apply a device frame to a STOPPED AVD."""
-    safe = "".join(c for c in skin if c.isalnum() or c in "_-")
+    safe = "".join(c for c in (skin or "") if c.isalnum() or c in "_-")
     if not paths.sdk or not (paths.sdk / "skins" / safe).exists():
         return {"ok": False, "err": f"skin not shipped in SDK: {skin}"}
+    if not re.fullmatch(r"[\w.\-]+", name or ""):
+        return {"ok": False, "err": "invalid AVD name"}
     cfg = Path.home() / ".android" / "avd" / f"{name}.avd" / "config.ini"
     if not cfg.exists():
         return {"ok": False, "err": f"AVD not found: {name}"}
-    kv = {"skin.name": safe, "skin.path": str(paths.sdk / "skins" / safe),
-          "skin.dynamic": "yes"}
-    lines, seen = [], set()
-    for line in cfg.read_text(encoding="utf-8", errors="ignore").splitlines():
-        if "=" in line and line.split("=", 1)[0].strip() in kv:
-            k = line.split("=", 1)[0].strip()
-            lines.append(f"{k}={kv[k]}")
-            seen.add(k)
-        else:
-            lines.append(line)
-    for k, v in kv.items():
-        if k not in seen:
-            lines.append(f"{k}={v}")
-    cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        inifile.upsert(cfg, {"skin.name": safe,
+                             "skin.path": str(paths.sdk / "skins" / safe),
+                             "skin.dynamic": "yes"})
+    except OSError as e:
+        return {"ok": False, "err": f"could not write config.ini: {e}"}
     return {"ok": True, "avd": name, "skin": safe}

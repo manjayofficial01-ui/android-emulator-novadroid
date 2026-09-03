@@ -5,7 +5,6 @@ is the mandatory path. `emulator-check accel` returns 0 when ready.
 """
 from __future__ import annotations
 
-import subprocess
 from .config import ToolPaths
 from .runner import run
 
@@ -26,13 +25,18 @@ def accel_status(paths: ToolPaths) -> dict:
     info["sunset_note"] = ("AEHD sunsets Dec 31 2026 — use WHPX. "
                            "Enable: Windows Features > Windows Hypervisor Platform + BIOS VT-x/AMD-V.")
     # Lightweight Hyper-V/WHPX feature probe (best effort, never fails hard)
-    try:
-        p = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "Get-WindowsOptionalFeature -Online | Where-Object {$_.FeatureName -match 'HypervisorPlatform|VirtualMachinePlatform|Microsoft-Hyper-V'} | Select-Object FeatureName,State | Format-Table -HideTableHeaders | Out-String"],
-            capture_output=True, text=True, timeout=30)
-        if p.stdout.strip():
-            info["windows_features"] = p.stdout.strip()[:2000]
-    except Exception as e:
-        info["windows_features"] = f"probe skipped: {e}"
+    r = run(["powershell", "-NoProfile", "-Command",
+             "Get-WindowsOptionalFeature -Online | "
+             "Where-Object {$_.FeatureName -match "
+             "'HypervisorPlatform|VirtualMachinePlatform|Microsoft-Hyper-V'} | "
+             "Select-Object FeatureName,State | Format-Table -HideTableHeaders | "
+             "Out-String"], timeout=45)
+    if r["ok"] and r["out"].strip():
+        info["windows_features"] = r["out"].strip()[:2000]
+        # Turn the wall of text into something the UI can act on.
+        enabled = [l.split()[0] for l in r["out"].splitlines()
+                   if l.strip().endswith("Enabled") and l.split()]
+        info["features_enabled"] = enabled
+    else:
+        info["windows_features"] = f"probe skipped: {r['err']}"[:400]
     return info

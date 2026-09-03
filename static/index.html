@@ -10,6 +10,8 @@
 <header class="topbar">
   <div class="brand"><span class="logo">◈</span> NovaDroid <span class="tag">for Windows</span></div>
   <div class="top-actions">
+    <label class="conn-label" for="device">Device</label>
+    <select id="device" class="devsel" title="Active device — every panel below targets it"></select>
     <span id="health" class="pill">● connecting…</span>
     <button id="btn-refresh" class="btn small">↻ Refresh all</button>
   </div>
@@ -26,7 +28,7 @@
 </div>
 
 <main class="grid">
-  <!-- LEFT: fleet -->
+  <!-- ============================ LEFT: fleet ============================ -->
   <section class="card">
     <h2>Virtual Devices <span class="sub">QEMU · ranchu · gfxstream · WHPX</span></h2>
     <div class="row">
@@ -34,6 +36,12 @@
       <button id="btn-create" class="btn primary">＋ Create AVD</button>
     </div>
     <div id="avds" class="list"></div>
+    <div class="row fleet">
+      <button id="btn-fleet-start" class="btn small">▶ Start checked</button>
+      <button id="btn-fleet-stop" class="btn small">⏹ Stop checked</button>
+      <button id="btn-fleet-all" class="btn small">✓ Check all</button>
+      <span class="hint">boots are staggered so instances don't fight over disk I/O</span>
+    </div>
     <h3>Advanced launch <span class="sub">raw emulator flags</span></h3>
     <div class="row">
       <input id="raw-name" placeholder="AVD name">
@@ -43,28 +51,45 @@
     <p class="hint">GPU: <code>host</code> · <code>swiftshader_indirect</code> · <code>lavapipe</code> · <code>angle</code> &nbsp;|&nbsp; Try <code>-feature VulkanNativeSwapchain</code> on XR/new images. Snapshots break under Vulkan — add <code>-no-snapshot</code> then.</p>
   </section>
 
-  <!-- MID: devices + screen -->
+  <!-- ========================== MID: live device ========================== -->
   <section class="card">
-    <h2>Running devices <span class="sub">ADB · delta-install · WebRTC-class screen</span></h2>
-    <div id="devices" class="list"></div>
+    <h2>Live device <span class="sub">click &amp; drag on the screen to control it</span></h2>
     <div class="screen-wrap">
       <div class="row">
-        <select id="shot-device"></select>
         <button id="btn-shot" class="btn">📷 Screenshot</button>
-        <button id="btn-live" class="btn toggle">▶ Live (3s)</button>
+        <button id="btn-live" class="btn toggle">▶ Live</button>
+        <select id="live-fps" title="Live refresh target">
+          <option value="500">0.5s</option>
+          <option value="1000">1s</option>
+          <option value="2000" selected>2s</option>
+          <option value="4000">4s</option>
+        </select>
+        <span id="live-info" class="mono">idle</span>
       </div>
-      <img id="screen" alt="device screen appears here">
+      <div class="stage">
+        <img id="screen" alt="device screen appears here" draggable="false">
+        <div id="touch-dot" class="touch-dot hidden"></div>
+      </div>
       <div class="row">
-        <button class="btn small" data-key="3">⌂ Home</button>
-        <button class="btn small" data-key="4">← Back</button>
-        <button class="btn small" data-key="187">▦ Recent</button>
+        <button class="btn small navkey" data-key="3">⌂ Home</button>
+        <button class="btn small navkey" data-key="4">← Back</button>
+        <button class="btn small navkey" data-key="187">▦ Recent</button>
+        <button class="btn small navkey" data-key="26">⏻ Power</button>
+        <button id="btn-rotate" class="btn small" title="Rotate via emulator console">⟳ Rotate</button>
         <button id="btn-uia" class="btn small">⧉ Layout</button>
       </div>
+      <div class="row">
+        <input id="type-text" placeholder="Type into the device…">
+        <button id="btn-type" class="btn small">⌨ Send</button>
+      </div>
+      <pre id="input-log" class="mono short"></pre>
       <pre id="layout" class="mono hidden"></pre>
     </div>
+    <h3>Running devices</h3>
+    <div id="devices" class="list"></div>
   </section>
 
-  <!-- RIGHT: ops -->
+  <!-- ========================= RIGHT: ops =============================== -->
   <section class="card">
     <h2>App &amp; World Ops</h2>
     <label>APK install (drag-drop path or browse)</label>
@@ -87,25 +112,60 @@
       <div>
         <label>Battery</label>
         <div class="row"><input id="batt" type="number" value="85" min="0" max="100">
+        <select id="batt-status" title="charging state">
+          <option value="not-charging">not-charging</option>
+          <option value="charging">charging</option>
+          <option value="discharging">discharging</option>
+          <option value="full">full</option>
+        </select>
         <button id="btn-batt" class="btn">🔋 Set</button></div>
+        <button id="btn-batt-reset" class="btn small">↺ Stop mocking</button>
       </div>
     </div>
     <label>ADB shell (guarded)</label>
     <div class="row"><input id="shell" placeholder="getprop ro.build.version.release"><button id="btn-shell" class="btn">❯ Run</button></div>
     <pre id="shell-out" class="mono"></pre>
-    <label>Performance (guest)</label>
+    <label>Guest performance</label>
     <div class="row"><button id="btn-perf" class="btn">⚡ Sample</button><span id="perf" class="mono"></span></div>
     <pre id="perf-out" class="mono"></pre>
   </section>
 
-  <!-- TABLET & DISPLAY -->
+  <!-- ========================= SYSTEM HEALTH ============================ -->
+  <section class="card wide">
+    <h2>System health <span class="sub">host PC + guest — the two machines that decide smoothness</span></h2>
+    <div class="row two">
+      <div>
+        <label>Host <span id="host-head" class="mono"></span></label>
+        <div class="bars">
+          <div class="bar-row"><span class="bar-label">CPU</span>
+            <div class="bar"><div id="bar-cpu" class="fill cpu"></div></div><span id="val-cpu" class="bar-val">–</span></div>
+          <div class="bar-row"><span class="bar-label">RAM</span>
+            <div class="bar"><div id="bar-ram" class="fill ram"></div></div><span id="val-ram" class="bar-val">–</span></div>
+          <div class="bar-row"><span class="bar-label">Disk</span>
+            <div class="bar"><div id="bar-disk" class="fill disk"></div></div><span id="val-disk" class="bar-val">–</span></div>
+        </div>
+        <pre id="host-out" class="mono short"></pre>
+      </div>
+      <div>
+        <label>Guest <span id="guest-head" class="mono"></span></label>
+        <div class="bars">
+          <div class="bar-row"><span class="bar-label">RAM</span>
+            <div class="bar"><div id="bar-gmem" class="fill ram"></div></div><span id="val-gmem" class="bar-val">–</span></div>
+          <div class="bar-row"><span class="bar-label">Load</span>
+            <div class="bar"><div id="bar-load" class="fill cpu"></div></div><span id="val-load" class="bar-val">–</span></div>
+        </div>
+        <pre id="guest-out" class="mono short"></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================= TABLET & DISPLAY ========================= -->
   <section class="card wide">
     <h2>Tablet &amp; Display <span class="sub">live resize via wm · no reboot · Pixel Tablet frame pre-installed</span></h2>
     <div class="row two">
       <div>
-        <label>Target device</label>
-        <div class="row"><select id="disp-device"></select><button id="btn-disp-get" class="btn small">⌖ Read current</button></div>
-        <pre id="disp-cur" class="mono">current display appears here</pre>
+        <div class="row"><button id="btn-disp-get" class="btn small">⌖ Read current</button>
+          <span id="disp-cur" class="mono inline">current display appears here</span></div>
         <label>One-tap tablet presets (live)</label>
         <div id="presets" class="row"></div>
         <label>Custom resolution (w × h @ dpi)</label>
@@ -130,7 +190,88 @@
     </div>
   </section>
 
-  <!-- SHARED FOLDER + APK COMPAT -->
+  <!-- ======================== APPS & LOGCAT ============================= -->
+  <section class="card wide">
+    <h2>Installed apps &amp; logcat <span class="sub">launch, freeze, wipe data, uninstall · live system log</span></h2>
+    <div class="row two">
+      <div>
+        <div class="row">
+          <input id="app-filter" placeholder="filter packages…">
+          <select id="app-scope" title="package scope">
+            <option value="1">3rd-party</option>
+            <option value="0">all</option>
+          </select>
+          <button id="btn-apps" class="btn small">↻ Load</button>
+        </div>
+        <div id="apps" class="list tall"></div>
+      </div>
+      <div>
+        <div class="row">
+          <input id="logcat-spec" placeholder="filter spec e.g. ActivityManager:E *:S">
+          <select id="logcat-lines">
+            <option value="100">100</option>
+            <option value="300" selected>300</option>
+            <option value="1000">1000</option>
+          </select>
+          <button id="btn-logcat" class="btn small">📜 Fetch</button>
+          <button id="btn-logcat-live" class="btn small toggle">▶ Tail</button>
+          <button id="btn-logcat-clear" class="btn small">🧹 Clear</button>
+        </div>
+        <pre id="logcat-out" class="mono tall"></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= DEVICE SIMULATION ========================== -->
+  <section class="card wide">
+    <h2>Device simulation <span class="sub">sensors · radio · biometrics · telephony · clipboard · recording</span></h2>
+    <div class="row three">
+      <div>
+        <label>Sensors</label>
+        <div class="row"><select id="sensor-kind"></select></div>
+        <div class="row"><input id="sv1" placeholder="x / value"><input id="sv2" placeholder="y"><input id="sv3" placeholder="z"></div>
+        <div class="row"><button id="btn-sensor" class="btn small">📡 Inject</button>
+          <button class="btn small sensor-preset" data-kind="acceleration" data-v="0:0:9.81">Flat</button>
+          <button class="btn small sensor-preset" data-kind="acceleration" data-v="12:0:5">Shake</button>
+          <button class="btn small sensor-preset" data-kind="acceleration" data-v="-9.8:0:0">Tilt&nbsp;L</button>
+        </div>
+        <label>Network conditioning</label>
+        <div class="row"><select id="net-speed"></select><select id="net-delay"></select>
+          <button id="btn-net" class="btn small">📶 Apply</button></div>
+        <div class="row"><button id="btn-finger" class="btn small">👆 Fingerprint</button>
+          <button id="btn-power" class="btn small">⏻ Power</button></div>
+      </div>
+      <div>
+        <label>Telephony</label>
+        <div class="row"><input id="tel-num" placeholder="+15550100"><button id="btn-call" class="btn small">📞 Incoming call</button></div>
+        <div class="row"><input id="sms-text" placeholder="message text"><button id="btn-sms" class="btn small">✉ SMS</button></div>
+        <label>Signal strength</label>
+        <div class="row"><select id="sig-level">
+            <option value="0">0 — no service</option>
+            <option value="2">2 — weak</option>
+            <option value="4" selected>4 — full</option>
+          </select><button id="btn-sig" class="btn small">📶 Set</button></div>
+        <label>Quickboot snapshots</label>
+        <div class="row"><input id="snap-name" placeholder="default_boot">
+          <button id="btn-snap-save" class="btn small">💾 Save</button>
+          <button id="btn-snap-load" class="btn small">⤺ Load</button>
+          <button id="btn-snap-del" class="btn small danger">🗑 Del</button></div>
+      </div>
+      <div>
+        <label>Clipboard PC ⇄ device</label>
+        <textarea id="clip" rows="3" placeholder="device clipboard contents"></textarea>
+        <div class="row"><button id="btn-clip-get" class="btn small">⬇ Read device</button>
+          <button id="btn-clip-set" class="btn small">⬆ Send to device</button></div>
+        <label>Screen recording</label>
+        <div class="row"><input id="rec-secs" type="number" value="30" min="1" max="180" style="max-width:90px">
+          <button id="btn-rec-start" class="btn small">⏺ Record</button>
+          <button id="btn-rec-stop" class="btn small">⏹ Stop</button></div>
+        <div id="rec-state" class="mono short"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== SHARED FOLDER + APK COMPAT ==================== -->
   <section class="card wide">
     <h2>Shared Folder &amp; APK Compatibility <span class="sub">one folder for PC + emulator · ARM phone APKs OK via translation</span></h2>
     <div class="row two">
@@ -141,13 +282,15 @@
         <button id="btn-syncnow" class="btn small primary">⇄ Sync now</button>
         <button id="btn-exact" class="btn small danger" title="Delete every device file that is not in Desktop/">📲 Device := Desktop</button>
         <button id="btn-autosync" class="btn small toggle">🔁 Auto-sync off</button></div>
-        <div class="row"><select id="shared-device"></select><span id="sync-state" class="mono">auto-sync idle</span></div>
+        <div class="row"><span id="sync-state" class="mono">auto-sync idle</span></div>
         <div class="row two">
           <div><label>📤 Desktop folder — drop files here to share TO device (⬆ push · 🗑 delete everywhere)</label><div id="shared-pc" class="list"><div class="mono">—</div></div></div>
           <div><label>📥 Device folder — exact copy FROM device (🗑 delete everywhere)</label><div id="shared-dev" class="list"><div class="mono">—</div></div></div>
         </div>
         <div class="row"><button id="btn-push" class="btn small">⬆ Push Desktop</button>
         <button id="btn-pull" class="btn small">⬇ Pull device</button></div>
+        <div class="row"><button id="btn-export-pc" class="btn small primary" title="Copy every staged Desktop file to your real Windows Desktop">🖥 Export PC → Desktop</button>
+        <button id="btn-export-dev" class="btn small primary" title="Pull & copy every device file to your real Windows Desktop">🖥 Export Device → Desktop</button></div>
         <label>Upload file from browser (lands in shared folder)</label>
         <div class="row"><input id="up-file" type="file"><button id="btn-upload" class="btn">⬆ Upload</button></div>
       </div>
@@ -160,13 +303,13 @@
     </div>
   </section>
 
-  <!-- BOTTOM: macros + sync -->
+  <!-- ========================= AUTOMATION =============================== -->
   <section class="card wide">
     <h2>Automation <span class="sub">Nox/LDPlayer-class macros + multi-instance synchronizer</span></h2>
     <div class="row two">
       <div>
         <label>Macro recorder (click steps run on target device)</label>
-        <div class="row"><input id="macro-name" placeholder="farm-daily"><button id="btn-macro-save" class="btn">💾 Save demo macro</button><button id="btn-macro-run" class="btn primary">▶ Run</button></div>
+        <div class="row"><input id="macro-name" placeholder="farm-daily"><button id="btn-macro-save" class="btn">💾 Save</button><button id="btn-macro-run" class="btn primary">▶ Run</button><button id="btn-macro-del" class="btn small danger">🗑</button></div>
         <div class="row"><button class="btn small" data-macro='{"type":"tap","x":540,"y":1600}'>＋Tap</button>
         <button class="btn small" data-macro='{"type":"swipe","x1":540,"y1":1400,"x2":540,"y2":400,"ms":400}'>＋Swipe↑</button>
         <button class="btn small" data-macro='{"type":"key","code":3}'>＋Home</button>
@@ -176,7 +319,7 @@
         <div id="macros" class="mono"></div>
       </div>
       <div>
-        <label>Operation synchronizer — mirror one tap to ALL devices</label>
+        <label>Operation synchronizer — mirror one tap to ALL devices (parallel)</label>
         <div class="row"><input id="sync-x" value="540"><input id="sync-y" value="1200"><button id="btn-sync" class="btn primary">⛓ Sync-tap all</button></div>
         <pre id="sync-out" class="mono"></pre>
         <h3>System</h3>
@@ -186,7 +329,7 @@
   </section>
 </main>
 
-<footer>Engine: Google Android Emulator (QEMU ranchu · gfxstream · WHPX) · Manager: NovaDroid <span id="agent-v">1.x</span> · No ads · Android 16/17 images · <span id="sdk"></span></footer></footer>
+<footer>Engine: Google Android Emulator (QEMU ranchu · gfxstream · WHPX) · Manager: NovaDroid <span id="agent-v">1.x</span> · No ads · Android 16/17 images · <span id="sdk"></span></footer>
 <script src="/app.js"></script>
 </body>
 </html>

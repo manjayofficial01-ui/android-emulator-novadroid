@@ -24,11 +24,29 @@ from .config import ToolPaths
 from .runner import run
 
 
+def _version_key(name: str) -> tuple:
+    """Sort build-tools dirs numerically, not lexicographically.
+
+    String sorting put "9.0.0" after "36.0.0", so the newest aapt2 was
+    skipped in favour of a decade-old one whenever both were installed.
+
+    Pre-release suffixes sort BELOW their release: "36.0.0-rc1" < "36.0.0".
+    The naive regex grabbed the `1` out of "rc1", which sorted the rc ABOVE
+    the release — fixed by taking the dotted-number prefix only and using a
+    trailing `pre` flag (0 for a pre-release, 1 for the real release).
+    """
+    base = name.split("-", 1)[0]                 # "36.0.0-rc1" -> "36.0.0"
+    nums = [int(p) for p in re.findall(r"\d+", base)[:4]]
+    nums = (nums + [0, 0, 0, 0])[:4]
+    pre = 0 if "-" in name else 1                # release ranks above pre-release
+    return (nums[0], nums[1], nums[2], nums[3], pre)
+
+
 def find_aapt2(sdk: Path | None) -> str | None:
     if not sdk:
         return None
     cands = sorted((sdk / "build-tools").glob("*/aapt2.exe"),
-                   key=lambda p: p.parent.name)
+                   key=lambda p: _version_key(p.parent.name))
     return str(cands[-1]) if cands else None
 
 

@@ -11,6 +11,7 @@ Transport is adb (no root, no guest tools), plus media-scanner broadcasts.
 from __future__ import annotations
 
 import base64
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -64,6 +65,34 @@ def desktop_dir() -> Path:
 
 def device_mirror_dir() -> Path:
     return shared_dir() / "Device"
+
+
+def windows_desktop() -> Path:
+    """The user's real Windows Desktop, best-effort resolved.
+
+    ~\\Desktop can be redirected (OneDrive / non-English locale), so we ask
+    the shell for CSIDL_DESKTOPDIRECTORY (0x10) and fall back to ~/Desktop.
+    Always exists afterwards (created if missing).
+    """
+    d = Path.home() / "Desktop"
+    try:
+        import ctypes
+        from ctypes import wintypes
+        buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+        ctypes.windll.shell32.SHGetFolderPathW.argtypes = [
+            wintypes.HWND, ctypes.c_int, wintypes.HANDLE, ctypes.c_uint,
+            ctypes.c_wchar_p]
+        ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, buf)
+        cand = Path(buf.value)
+        if cand and cand.exists():
+            d = cand
+    except Exception:
+        pass
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return d
 
 
 def _ls(d: Path) -> list[dict]:
@@ -230,6 +259,51 @@ def pull(paths: ToolPaths, serial: str, names: list[str] | None = None) -> dict:
     out = {"ok": not failed, "pulled": pulled, "skipped": skipped}
     if failed:
         out["err"] = f"failed: {', '.join(failed)}"
+    return out
+
+
+def export_to_desktop(paths: ToolPaths, serial: str, names: list[str],
+                       source: str = "device") -> dict:
+    """Copy selected shared files to the user's real Windows Desktop.
+
+    source='device' pulls the named files from the emulator first (if online),
+    then copies them out of the Device/ mirror. source='pc' copies straight
+    from the Desktop/ staging folder. Never deletes; on a name clash on the
+    Desktop the copy is kept with a '(NovaDroid)' suffix so nothing is clobbered.
+    """
+    if not names:
+        return {"ok": False, "err": "no files selected"}
+    dst = windows_desktop()
+    if source == "device":
+        if (e := _check(paths, serial)):
+            return e
+        if not _online(paths, serial):
+            return {"ok": False, "err": f"{serial} is offline"}
+        pull(paths, serial, names)  # best-effort: only the named files
+        src_dir = device_mirror_dir()
+    else:
+        src_dir = desktop_dir()
+    copied, failed = [], []
+    for n in names:
+        clean = Path(n).name
+        if not clean:
+            continue
+        src = src_dir / clean
+        if not src.exists() or not src.is_file():
+            failed.append(clean)
+            continue
+        target = dst / clean
+        if target.exists():
+            target = dst / f"{src.stem} (NovaDroid){src.suffix}"
+        try:
+            shutil.copy2(src, target)
+            copied.append(target.name)
+        except Exception:
+            failed.append(clean)
+    out: dict = {"ok": not failed, "desktop": str(dst),
+                 "source": source, "copied": copied}
+    if failed:
+        out["err"] = f"not found/refused: {', '.join(failed)}"
     return out
 
 

@@ -54,3 +54,22 @@ GUEST: goldfish/ranchu kernel ─▶ goldfish HAL + gfxstream guest ─▶ frame
 ## 5. What NovaDroid deliberately does NOT rebuild
 
 Hypervisor, QEMU fork, kernel, HAL, Play integrity — Google owns that stack and ships it free. Rebuilding it = years, worse compat, instant staleness. NovaDroid is the **best manager + ops layer** on top of the best engine, which is how BlueStacks/LDPlayer themselves work (managed QEMU/VirtualBox images + value-add UX).
+
+## 6. Research → shipped (v2.0.0 engineering outcomes)
+
+The competitive + AOSP research above directly drove these fixes/features (full list in `README.md › v2.0.0`):
+
+| Research insight | Engineering action |
+|---|---|
+| WHPX = 8–12× TCG; 4 vCPU cap | `config.DEFAULTS` 4CPU/4GB baseline; `accel` gates on `emulator-check` |
+| Quickboot 6–15s vs 50s+ cold | Quickboot-first UX + `wipe-data` helper + snapshot caveats |
+| LDPlayer-class synchronizer | `/api/sync-tap` mirrors input across N instances |
+| Nox-class macros | tap/swipe/text/key/sleep macros, file-based, replay via `adb input` |
+| Genymotion-class ops | GPS routes, battery, network, sensor/camera injection |
+| gfxstream full ladder | raw flags incl. `VulkanNativeSwapchain`, Lavapipe, SwiftShader-indirect |
+| Multi-instance correctness | per-instance `adb emu avd name` serial map (no cross-instance kill) |
+| Zero-config P2P (36.10+) | Wi-Fi Direct/NSD surfaced; no port-forward scripts |
+
+Bug fixes grounded in real device behavior (numeric battery codes, clipboard
+console "unsupported but exit 0", pre-release version sort, divergent ini
+writers) are all covered by the 88-test suite.
