@@ -304,6 +304,47 @@ def delete_pc(names: list[str]) -> dict:
     return out
 
 
+def delete_everywhere(paths: ToolPaths, serial: str, names: list[str]) -> dict:
+    """Delete from BOTH desktop and device in one click (the 🗑 button).
+
+    No serial / offline device → still deletes from the desktop and says so.
+    Merge-sync can never resurrect these: it only copies files that exist.
+    """
+    pc = delete_pc(names or [])
+    dev: dict = {"ok": True, "deleted": [], "note": "no device picked"}
+    if serial:
+        if not _online(paths, serial):
+            dev = {"ok": False, "deleted": [],
+                   "note": f"{serial} offline — deleted from desktop only"}
+        else:
+            dr = delete_device(paths, serial, names or [])
+            dev = {"ok": dr["ok"], "deleted": dr.get("deleted", []),
+                   "note": dr.get("err", "")}
+    return {"ok": bool(pc.get("ok")), "deleted_pc": pc.get("deleted", []),
+            "deleted_device": dev.get("deleted", []),
+            "device_note": dev.get("note", ""),
+            "err": pc.get("err", "")}
+    gone, bad = [], []
+    for n in names or []:
+        p = _pc_path(n)
+        if p is None or not p.exists():
+            bad.append(n)
+            continue
+        try:
+            if p.is_dir() and not p.is_symlink():
+                import shutil as _sh
+                _sh.rmtree(p)
+            else:
+                p.unlink()
+            gone.append(Path(n).name)
+        except Exception:
+            bad.append(n)
+    out: dict = {"ok": not bad, "deleted": gone}
+    if bad:
+        out["err"] = f"not found/refused: {', '.join(bad)}"
+    return out
+
+
 def delete_device(paths: ToolPaths, serial: str, names: list[str]) -> dict:
     """Permanently delete entries from the device folder (rm inside it only)."""
     if (e := _check(paths, serial)):

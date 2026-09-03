@@ -204,6 +204,16 @@ async function loadShared(){
       : (autosyncOn ? 'auto-sync on · pick a device' : 'auto-sync idle');
   }catch(e){ /* backend offline — pill already shows it */ }
 }
+async function deleteBoth(name){
+  const se = sharedSerial();
+  if(!confirm(`Permanently delete "${name}" from BOTH desktop and device${se ? '' : ' (no device picked — desktop only)'}?`)) return;
+  const d = await safeApi('POST','/api/shared/delete',{serial:se, files:[name]});
+  if(d.ok){
+    const dev = d.deleted_device?.length ? `device ✓` : (d.device_note || 'device: n/a');
+    alert(`Deleted "${name}" — desktop ✓, ${dev}. It will NOT come back on sync.`);
+  } else alert('Delete failed: ' + (d.err || d.device_note || ''));
+  loadShared();
+}
 $('#shared-pc').onclick = async e => {
   const t = e.target?.dataset || {};
   if(t.push){
@@ -211,9 +221,7 @@ $('#shared-pc').onclick = async e => {
     const d = await safeApi('POST','/api/shared/push',{serial:se, files:[t.push]});
     if(d.ok) loadShared(); else alert('Import failed: ' + (d.err || ''));
   } else if(t.delpc){
-    if(!confirm(`Permanently delete "${t.delpc}" from the desktop folder?`)) return;
-    const d = await safeApi('POST','/api/shared/delete-pc',{files:[t.delpc]});
-    if(d.ok) loadShared(); else alert('Delete failed: ' + (d.err || ''));
+    deleteBoth(t.delpc);
   }
 };
 $('#shared-dev').onclick = async e => {
@@ -224,10 +232,7 @@ $('#shared-dev').onclick = async e => {
     alert(d.ok ? `Exported ${t.pull} to the desktop folder ✓` : 'Export failed: ' + (d.err || ''));
     loadShared();
   } else if(t.deldev){
-    const se = needSharedSerial(); if(!se) return;
-    if(!confirm(`Permanently delete "${t.deldev}" from the device?`)) return;
-    const d = await safeApi('POST','/api/shared/delete-device',{serial:se, files:[t.deldev]});
-    if(d.ok) loadShared(); else alert('Delete failed: ' + (d.err || ''));
+    deleteBoth(t.deldev);
   }
 };
 $('#btn-reveal').onclick = async()=>{ await safeApi('POST','/api/shared/reveal',{}); };

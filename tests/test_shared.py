@@ -168,5 +168,27 @@ class TestCompat(unittest.TestCase):
         self.assertFalse(v["install_anyway"])
 
 
+class TestDeleteBoth(unittest.TestCase):
+    def test_pc_only_without_device(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, TempHome(td):
+            (Path(SHARE.shared_dir()) / "bye.txt").write_text("x", encoding="utf-8")
+            r = SHARE.delete_everywhere(PATHS, "", ["bye.txt"])
+            self.assertTrue(r["ok"] and r["deleted_pc"] == ["bye.txt"])
+            self.assertEqual(r["deleted_device"], [])
+
+    def test_offline_device_still_deletes_pc(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, TempHome(td):
+            (Path(SHARE.shared_dir()) / "bye2.txt").write_text("x", encoding="utf-8")
+            r = SHARE.delete_everywhere(PATHS, "emulator-9999", ["bye2.txt"])
+            self.assertTrue(r["ok"] and r["deleted_pc"] == ["bye2.txt"])
+            self.assertIn("offline", r["device_note"])
+
+    def test_missing_file(self):
+        r = SHARE.delete_everywhere(PATHS, "", ["nope.txt"])
+        self.assertFalse(r["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

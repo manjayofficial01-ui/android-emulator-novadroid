@@ -250,6 +250,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(SHARE.delete_pc(b.get("files", [])))
         if path == "/api/shared/delete-device":
             return self._json(SHARE.delete_device(PATHS, b.get("serial", ""), b.get("files", [])))
+        if path == "/api/shared/delete":
+            return self._json(SHARE.delete_everywhere(PATHS, b.get("serial", ""), b.get("files", [])))
         if path == "/api/shared/reveal":
             return self._json(SHARE.reveal())
         if path == "/api/apk/analyze":
