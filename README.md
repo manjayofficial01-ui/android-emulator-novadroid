@@ -3,6 +3,9 @@
 **Live dashboard:** https://novadroid-rho.vercel.app (static UI on Vercel —
 paste your tunnel URL + token in its 🔌 Backend bar; full runbook in `DEPLOY.md`)
 
+**Source:** https://github.com/manjayofficial01-ui/android-emulator-novadroid —
+linked to Vercel, so every push to `main` auto-redeploys the dashboard.
+
 Built from deep 2026 research (`RESEARCH.md`) on BlueStacks 5, LDPlayer 9, MuMu 12, Nox 7, MEmu 9, GameLoop, Genymotion, and the Google Android Emulator engine.
 
 **Strategy:** don't reinvent the hypervisor. Ship the industry-best *engine* (Google Emulator 37.x — forked QEMU + ranchu + gfxstream + WHPX, Android 16/17, free, no ads) and beat everyone on the *manager layer*: multi-instance sync, macros, perf dashboard, sensor injection, quickboot-first UX.
