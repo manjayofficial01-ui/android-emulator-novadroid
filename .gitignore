@@ -6,3 +6,7 @@ __pycache__/
 .vercel/
 # Local leftovers
 roundtrip*
+
+# v4 cleanup: stale smoke-test snapshots from old tooling
+.smoke/
+smoke*.log

@@ -25,8 +25,25 @@ IS_WINDOWS = os.name == "nt"
 
 # Emulator-side processes worth surfacing (QEMU children + the Qt launcher
 # + Google's crash reporter, which leaks a process per AVD).
+#
+# Matched by PREFIX, not equality: the real binary is
+# `qemu-system-x86_64-headless.exe` (and `-winsys`, `-no-window` variants).
+# Exact-matching "qemu-system-x86_64" silently missed every headless launch —
+# including the orphan that holds the multi-instance lock and blocks all other
+# AVDs from starting — so the System panel reported "0 emulator processes"
+# while a zombie was pinning the SDK.
 EMU_PROCS = ("qemu-system-x86_64", "qemu-system-aarch64", "qemu-system-armel",
-             "qemu-system-i386", "emulator", "crash-service", "crashpad_handler")
+             "qemu-system-i386", "qemu-system-riscv64", "emulator",
+             "crash-service", "crashpad_handler")
+
+
+def _is_emu_proc(name: str) -> bool:
+    base = name[:-4].lower() if name.lower().endswith(".exe") else name.lower()
+    # `emulator` must match exactly (a prefix match would swallow unrelated
+    # emulator-adjacent helpers); qemu-* matches by prefix for its variants.
+    if base == "emulator":
+        return True
+    return any(base.startswith(p) for p in EMU_PROCS if p != "emulator")
 
 _lock = threading.Lock()
 _last_times: tuple[int, int, int] | None = None
@@ -219,8 +236,7 @@ def emulator_processes() -> list[dict]:
             if len(parts) < 5:
                 continue
             name, pid, mem = parts[0], parts[1], parts[4]
-            base = name[:-4].lower() if name.lower().endswith(".exe") else name.lower()
-            if base in EMU_PROCS and pid.isdigit():
+            if _is_emu_proc(name) and pid.isdigit():
                 out.append({"name": name, "pid": int(pid), "mem_mb": _mem_to_mb(mem)})
     else:
         r = run(["ps", "-eo", "pid,rss,comm"], timeout=20)
@@ -229,7 +245,7 @@ def emulator_processes() -> list[dict]:
             if len(parts) < 3:
                 continue
             pid, rss, comm = parts
-            if comm.lower() in EMU_PROCS and pid.isdigit():
+            if _is_emu_proc(comm) and pid.isdigit():
                 out.append({"name": comm, "pid": int(pid), "mem_mb": int(rss) // 1024})
     return out
 

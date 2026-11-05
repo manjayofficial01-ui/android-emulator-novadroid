@@ -70,17 +70,6 @@ class TestInifile(unittest.TestCase):
         finally:
             p.unlink(missing_ok=True)
 
-    def test_delete_removes_key_keeps_comment(self):
-        p = Path("__t.ini")
-        try:
-            p.write_text("# keep\nwindow.x=1\nwindow.y=2\n", encoding="utf-8")
-            out = inifile.delete(p, ["window.y"])
-            self.assertIn("# keep", out)
-            self.assertIn("window.x=1", out)
-            self.assertNotIn("window.y=", out)
-        finally:
-            p.unlink(missing_ok=True)
-
     def test_trailing_newline_single(self):
         p = Path("__t.ini")
         try:

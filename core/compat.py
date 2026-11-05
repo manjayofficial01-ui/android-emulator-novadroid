@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from . import safe
 from .config import ToolPaths
 from .runner import run
 
@@ -51,18 +52,28 @@ def find_aapt2(sdk: Path | None) -> str | None:
 
 
 def apk_badging(paths: ToolPaths, apk_path: str) -> dict:
-    p = Path(apk_path)
-    if not p.exists():
-        return {"ok": False, "err": f"APK not found: {apk_path}"}
+    """Inspect an APK — but only one the operator is allowed to read.
+
+    v4 accepted ANY absolute host path, so /api/apk/analyze doubled as an
+    arbitrary-file-existence probe and echoed the full path back. `safe.apk_path`
+    confines it to the user folder / shared folder / configured roots and
+    only ever reports the basename.
+    """
+    p, err = safe.apk_path(apk_path)
+    if err:
+        return {"ok": False, "err": err}
     aapt2 = find_aapt2(paths.sdk)
     if not aapt2:
         return {"ok": False, "err": "aapt2 not found (install SDK build-tools)"}
     r = run([aapt2, "dump", "badging", str(p)], timeout=60)
     if not r["ok"]:
-        return {"ok": False, "err": f"not a valid APK: {r['err'][-300:]}"}
+        return {"ok": False, "err": "not a valid APK (aapt2 could not parse it)"}
     out = r["out"]
-    info: dict = {"ok": True, "file": p.name,
-                  "bytes_mb": round(p.stat().st_size / 1e6, 1)}
+    try:
+        size_mb = round(p.stat().st_size / 1e6, 1)
+    except OSError:
+        size_mb = 0
+    info: dict = {"ok": True, "file": p.name, "bytes_mb": size_mb}
     m = re.search(r"package: name='([^']+)' versionCode='([^']*)' versionName='([^']*)'", out)
     if m:
         info.update(package=m.group(1), versionCode=m.group(2), versionName=m.group(3))
@@ -80,20 +91,31 @@ def apk_badging(paths: ToolPaths, apk_path: str) -> dict:
     return info
 
 
+_DEVICE_CPU_PROPS = {
+    "ro.product.cpu.abilist": "abilist",
+    "ro.product.cpu.abi": "primary_abi",
+    "ro.build.version.sdk": "sdk",
+    "ro.build.version.release": "android",
+    "ro.dalvik.vm.native.bridge": "bridge",
+    "ro.product.model": "model",
+}
+
+
 def device_cpu(paths: ToolPaths, serial: str) -> dict:
+    """Device CPU/API facts — one adb round-trip, not six.
+
+    This runs on every "Analyze APK" and every device refresh. Six sequential
+    `adb shell getprop` calls made the compatibility verdict visibly laggy on
+    a cold adb server (~1s); `adb.getprops` collapses it to one.
+    """
     cpu: dict = {"serial": serial}
     if not paths.adb or not serial:
         return cpu
-    props = {"ro.product.cpu.abilist": "abilist",
-             "ro.product.cpu.abi": "primary_abi",
-             "ro.build.version.sdk": "sdk",
-             "ro.build.version.release": "android",
-             "ro.dalvik.vm.native.bridge": "bridge",
-             "ro.product.model": "model"}
-    for prop, key in props.items():
-        r = run([paths.adb, "-s", serial, "shell", "getprop", prop], timeout=10)
-        if r["ok"] and r["out"]:
-            cpu[key] = r["out"].strip()
+    from . import adb as ADB
+    raw = ADB.getprops(paths, serial, list(_DEVICE_CPU_PROPS))
+    for prop, key in _DEVICE_CPU_PROPS.items():
+        if raw.get(prop):
+            cpu[key] = raw[prop]
     try:
         cpu["sdk"] = int(cpu.get("sdk", 0))
     except ValueError:
@@ -147,14 +169,20 @@ def verdict(badging: dict, dev: dict) -> dict:
 
 
 def check(paths: ToolPaths, apk_path: str, serial: str = "") -> dict:
+    if serial and not safe.valid_serial(serial):
+        return {"ok": False, "err": "invalid device serial"}
     b = apk_badging(paths, apk_path)
     if not b.get("ok"):
         return b
     dev = device_cpu(paths, serial) if serial else {"sdk": 0}
     v = verdict(b, dev)
     v.update(apk=b, device=dev if serial else {"note": "no device selected — assuming Play x86_64 image"})
-    v["integrity_note"] = ("Banking/payment apps with hardware Play Integrity checks "
-                           "can refuse ANY emulator (BlueStacks/LDPlayer included) — "
-                           "that is attestation, not CPU compatibility.")
+    v["integrity_note"] = (
+        "Play Integrity expectations: MEETS_BASIC_INTEGRITY usually passes on "
+        "Play-signed emulator images; MEETS_DEVICE_INTEGRITY and "
+        "MEETS_STRONG_INTEGRITY will fail on ANY emulator (NovaDroid, "
+        "BlueStacks, Genymotion alike) — Google rotated the platform root "
+        "cert in Feb 2026 and explicitly targets emulator farms. Banking/"
+        "payment/anti-cheat failures are attestation, not CPU compatibility.")
     v["ok"] = True
     return v

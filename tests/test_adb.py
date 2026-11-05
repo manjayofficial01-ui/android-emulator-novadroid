@@ -7,7 +7,6 @@ Covers:
   * macro step validation (drops malformed instead of KeyError)
 Run: python -m unittest tests.test_adb -v
 """
-import json
 import sys
 import unittest
 from pathlib import Path
@@ -86,17 +85,34 @@ class TestGeoFix(unittest.TestCase):
         self.assertEqual(captured["cmd"][-2:], ["-70.0", "40.0"])
 
 
+def _fake_png(body: int = 2000) -> bytes:
+    """A PNG that actually terminates — magic, body, IEND chunk."""
+    return ADB.PNG_MAGIC + b"\x00" * body + ADB.PNG_IEND
+
+
 class TestScreenshot(unittest.TestCase):
     def test_exec_out_first(self):
-        png = ADB.PNG_MAGIC + b"\x00" * 2000
         with mock.patch.object(ADB, "run_bytes",
-                               return_value={"ok": True, "out": png, "err": ""}) as rb:
+                               return_value={"ok": True, "out": _fake_png(),
+                                             "err": ""}) as rb:
             r = ADB.screenshot(FAKE, "emulator-5554")
         self.assertTrue(r["ok"])
         self.assertEqual(r["via"], "exec-out")
         self.assertIn("png_b64", r)
         # the fast path used exec-out, not screencap+pull
         self.assertIn("exec-out", rb.call_args[0][0])
+
+    def test_rejects_truncated_png(self):
+        """a buffer with the magic but no IEND is a half-written frame, not
+        a screenshot — it must fall through instead of rendering broken."""
+        head_only = ADB.PNG_MAGIC + b"\x00" * 2000
+        with mock.patch.object(ADB, "run_bytes",
+                               return_value={"ok": True, "out": head_only,
+                                             "err": ""}):
+            with mock.patch.object(ADB, "run",
+                                   return_value={"ok": True, "out": "", "err": ""}):
+                r = ADB.screenshot(FAKE, "emulator-5554")
+        self.assertFalse(r["ok"])
 
     def test_falls_through_when_no_png(self):
         with mock.patch.object(ADB, "run_bytes",

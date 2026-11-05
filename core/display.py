@@ -11,7 +11,6 @@ Presets mirror real best-selling tablets so UI/layout QA matches hardware.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 from . import inifile
 from .config import ToolPaths
@@ -123,14 +122,6 @@ def parse_wm_density(text: str) -> int:
     return int(m.group(1)) if m else 0
 
 
-def size_tuple(paths: ToolPaths, serial: str) -> tuple[int, int]:
-    """(w, h) the device is currently rendering at."""
-    if (e := _check(paths, serial)):
-        return (0, 0)
-    r = run([paths.adb, "-s", serial, "shell", "wm size"], timeout=15)
-    return parse_wm_size(r["out"])
-
-
 # --------------------------------------------------------------------------
 # Live (no reboot)
 # --------------------------------------------------------------------------
@@ -162,6 +153,46 @@ def reset_display(paths: ToolPaths, serial: str) -> dict:
             "log": ((r1["out"] + r2["out"]) or (r1["err"] + r2["err"]))[:400]}
 
 
+# 60 is the default; 90/120 need an image/AVD that allows it (API 31+ images
+# honour peak_refresh_rate; the frame budget the smoothness engine scores
+# against follows the live value).
+REFRESH_RATES = (60, 90, 120)
+
+
+def set_refresh_rate(paths: ToolPaths, serial: str, hz) -> dict:
+    """High-FPS mode (LDPlayer/MuMu-class): 60 → 90 → 120 Hz, live.
+
+    Writes the global refresh-rate settings Android 12+ images honour, then
+    reads them back — because a rate the image silently ignores is exactly
+    the kind of "120 FPS!!" claim competitors make and we refuse to.
+    """
+    if (e := _check(paths, serial)):
+        return e
+    try:
+        hz = int(float(hz))
+    except (TypeError, ValueError):
+        return {"ok": False, "err": f"refresh must be one of {list(REFRESH_RATES)}"}
+    if hz not in REFRESH_RATES:
+        return {"ok": False, "err": f"refresh must be one of {list(REFRESH_RATES)}"}
+    r = run([paths.adb, "-s", serial, "shell",
+             f"settings put global peak_refresh_rate {hz}; "
+             f"settings put global user_preferred_refresh_rate {hz}; "
+             f"settings get global peak_refresh_rate"], timeout=20)
+    applied = (r["out"].splitlines() or [""])[-1].strip()
+    try:
+        # Some images exit 0 but print non-numeric text ("Bad setting: …");
+        # float() on that must not 500 the route.
+        ok = bool(r["ok"]) and applied not in ("", "null") \
+            and float(applied.split(".")[0]) == hz
+    except (TypeError, ValueError):
+        ok = False
+    return {"ok": ok, "hz": hz, "verified_hz": applied,
+            "note": ("Live. Persist it with Save refresh to AVD for every boot; "
+                     "real gain also needs a host GPU keeping up — watch the "
+                     "smoothness score." if ok else
+                     "This image ignored the refresh setting — AVD default stays.")}
+
+
 def set_orientation(paths: ToolPaths, serial: str, mode: str) -> dict:
     if (e := _check(paths, serial)):
         return e
@@ -185,6 +216,7 @@ def set_orientation(paths: ToolPaths, serial: str, mode: str) -> dict:
 # --------------------------------------------------------------------------
 def save_to_avd(name: str, w: int, h: int, dpi: int) -> dict:
     """Persist resolution into AVD config.ini. AVD must be STOPPED."""
+    from .avd import avd_dir
     parsed = _ints(w, h, dpi)
     if isinstance(parsed, str):
         return {"ok": False, "err": parsed}
@@ -193,7 +225,7 @@ def save_to_avd(name: str, w: int, h: int, dpi: int) -> dict:
         return {"ok": False, "err": err}
     if not re.fullmatch(r"[\w.\-]+", name or ""):
         return {"ok": False, "err": "invalid AVD name"}
-    cfg = (Path.home() / ".android" / "avd" / f"{name}.avd" / "config.ini")
+    cfg = avd_dir(name) / "config.ini"
     if not cfg.exists():
         return {"ok": False, "err": f"AVD not found: {name}"}
     try:
@@ -203,6 +235,28 @@ def save_to_avd(name: str, w: int, h: int, dpi: int) -> dict:
         return {"ok": False, "err": f"could not write config.ini: {e}"}
     return {"ok": True, "avd": name, "display": f"{w}x{h} @ {dpi}dpi",
             "note": "Takes effect on next (cold or quick) boot. Stop the AVD first."}
+
+
+def save_refresh_to_avd(name: str, hz: int) -> dict:
+    """Persist a default refresh rate into config.ini (hw.lcd.refresh)."""
+    from .avd import avd_dir
+    try:
+        hz = int(hz)
+    except (TypeError, ValueError):
+        return {"ok": False, "err": f"refresh must be one of {list(REFRESH_RATES)}"}
+    if hz not in REFRESH_RATES:
+        return {"ok": False, "err": f"refresh must be one of {list(REFRESH_RATES)}"}
+    if not re.fullmatch(r"[\w.\-]+", name or ""):
+        return {"ok": False, "err": "invalid AVD name"}
+    cfg = avd_dir(name) / "config.ini"
+    if not cfg.exists():
+        return {"ok": False, "err": f"AVD not found: {name}"}
+    try:
+        inifile.upsert(cfg, {"hw.lcd.refresh": str(hz)})
+    except OSError as e:
+        return {"ok": False, "err": f"could not write config.ini: {e}"}
+    return {"ok": True, "avd": name, "hz": hz,
+            "note": "Next boot starts at this rate (image permitting)."}
 
 
 def list_skins(paths: ToolPaths) -> dict:
@@ -218,12 +272,13 @@ def list_skins(paths: ToolPaths) -> dict:
 
 def set_skin(paths: ToolPaths, name: str, skin: str) -> dict:
     """Apply a device frame to a STOPPED AVD."""
+    from .avd import avd_dir
     safe = "".join(c for c in (skin or "") if c.isalnum() or c in "_-")
     if not paths.sdk or not (paths.sdk / "skins" / safe).exists():
         return {"ok": False, "err": f"skin not shipped in SDK: {skin}"}
     if not re.fullmatch(r"[\w.\-]+", name or ""):
         return {"ok": False, "err": "invalid AVD name"}
-    cfg = Path.home() / ".android" / "avd" / f"{name}.avd" / "config.ini"
+    cfg = avd_dir(name) / "config.ini"
     if not cfg.exists():
         return {"ok": False, "err": f"AVD not found: {name}"}
     try:

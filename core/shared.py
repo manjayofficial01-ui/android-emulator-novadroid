@@ -10,12 +10,12 @@ Transport is adb (no root, no guest tools), plus media-scanner broadcasts.
 """
 from __future__ import annotations
 
-import base64
 import shutil
 import threading
 import time
 from pathlib import Path
 
+from . import safe
 from .config import ToolPaths
 from .runner import run
 
@@ -23,6 +23,7 @@ DEVICE_DIR = "/sdcard/NovaDroid-Shared"
 MAX_UPLOAD_MB = 250
 GUIDE_NAME = "Put APKs, photos & files here.txt"
 _SYNC_JOBS: dict[str, dict] = {}
+_SYNC_JOBS_LOCK = threading.RLock()
 
 
 def shared_dir() -> Path:
@@ -100,40 +101,53 @@ def _ls(d: Path) -> list[dict]:
         files = [p for p in d.iterdir() if p.is_file()]
     except Exception:
         files = []
-    return [{"name": p.name, "bytes": p.stat().st_size, "mtime": p.stat().st_mtime}
-            for p in sorted(files)]
+    out = []
+    for p in sorted(files):
+        try:
+            # A file removed between iterdir() and stat() (concurrent trash
+            # click, autosync pull) must not 500 the whole listing.
+            st = p.stat()
+        except OSError:
+            continue
+        out.append({"name": p.name, "bytes": st.st_size, "mtime": st.st_mtime})
+    return out
 
 
 def _confine(base: Path, name: str) -> Path | None:
-    clean = Path(name).name
-    if not clean or clean in (".", ".."):
+    if not isinstance(name, str) or safe.has_control(name):
+        return None
+    clean = safe.safe_filename(name)
+    if not clean:
         return None
     p = base / clean
     try:
         if p.resolve().parent != base.resolve():
             return None
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         return None
     return p
 
 
 def _dev_name(name: str) -> str | None:
-    """Direct child of DEVICE_DIR only (no rm -rf /). Spaces/& fine —
-    single-quoted for the device shell; only the quote char is refused."""
-    if not name or "/" in name or "\\" in name:
+    """Direct child of DEVICE_DIR only (no `rm -rf /`).
+
+    v5 keeps the strict v4 allowlist even though `safe.sh_quote()` now makes
+    apostrophes harmless: refusing separators, quotes and control characters
+    costs almost nothing and gives a second, independent line of defence.
+    """
+    if (not isinstance(name, str) or not name or len(name) > 255
+            or safe.has_control(name)
+            or "/" in name or "\\" in name or "'" in name):
         return None
-    if "'" in name or "\n" in name:
-        return None
-    clean = Path(name).name
-    if not clean or clean in (".", ".."):
-        return None
-    return clean
+    clean = safe.safe_filename(name)
+    return clean or None
 
 
 def _q(remote: str) -> str:
-    """Single-quote a remote path — adb joins args with spaces, so an
-    unquoted 'My Video.mp4' would split into three paths on-device."""
-    return f"'{remote}'"
+    """POSIX-quote a remote path — adb joins args with spaces and hands them
+    to `/system/bin/sh -c`, so v4's naive `f"'{remote}'"` let a filename
+    containing an apostrophe inject arbitrary device-shell commands."""
+    return safe.sh_quote(remote)
 
 
 def _check(paths: ToolPaths, serial: str) -> dict | None:
@@ -141,6 +155,8 @@ def _check(paths: ToolPaths, serial: str) -> dict | None:
         return {"ok": False, "err": "adb not found"}
     if not serial:
         return {"ok": False, "err": "no device selected — Quickboot an AVD first"}
+    if not safe.valid_serial(serial):
+        return {"ok": False, "err": "invalid device serial"}
     return None
 
 
@@ -162,14 +178,23 @@ def status() -> dict:
 def _scan(paths: ToolPaths, serial: str, names: list[str]) -> None:
     """Tell Android's media scanner about new files (Gallery/Files pick them up)."""
     for n in names[:50]:  # cap: broadcasts are cheap but let's not spam
+        clean = _dev_name(n)
+        if not clean:
+            continue
+        # Whole URI is one POSIX-quoted word. A name like `a'; reboot; '`
+        # can no longer terminate the quote and append a second command.
+        uri = safe.sh_quote(f"file://{DEVICE_DIR}/{clean}")
         run([paths.adb, "-s", serial, "shell", "am", "broadcast",
              "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
-             "-d", _q(f"file://{DEVICE_DIR}/{n}")], timeout=10)
+             "-d", uri], timeout=10)
 
 
 def _push_one(paths: ToolPaths, serial: str, src: Path, dest: str) -> bool:
-    """Push a single file or dir. --sync skips unchanged files (fast re-syncs)."""
+    """Push a single file or dir. --sync skips unchanged files (fast re-syncs);
+    older platform-tools reject the flag, so retry once without it."""
     r = run([paths.adb, "-s", serial, "push", "--sync", str(src), dest], timeout=300)
+    if not r["ok"] and "unknown option" in (r["err"] + r["out"]).lower():
+        r = run([paths.adb, "-s", serial, "push", str(src), dest], timeout=300)
     return r["ok"]
 
 
@@ -181,7 +206,7 @@ def push(paths: ToolPaths, serial: str, names: list[str] | None = None) -> dict:
         return {"ok": False, "err": f"{serial} is offline"}
     base = desktop_dir()
     if names:
-        targets = [base / Path(n).name for n in names]
+        targets = [p for p in (_confine(base, n) for n in names) if p is not None]
     else:  # whole folder, files only — subdirs are organization, not payload
         targets = sorted(p for p in base.iterdir() if p.is_file())
     pushed, failed, skipped = [], [], 0
@@ -239,7 +264,10 @@ def pull(paths: ToolPaths, serial: str, names: list[str] | None = None) -> dict:
     dev = list_device(paths, serial)
     if not dev.get("ok"):
         return {"ok": False, "err": "could not list device folder"}
-    want = {f for f in dev["files"] if not f.endswith("/")}
+    # Device-controlled names must not become local path components: on
+    # Windows a backslash in a filename would let `mirror_dir / name` escape.
+    want = {c for c in (_dev_name(f) for f in dev["files"]
+                        if not f.endswith("/")) if c}
     sizes = _dev_sizes(paths, serial)
     pulled, skipped, failed = [], [], []
     for name in sorted(want):
@@ -270,6 +298,11 @@ def export_to_desktop(paths: ToolPaths, serial: str, names: list[str],
     then copies them out of the Device/ mirror. source='pc' copies straight
     from the Desktop/ staging folder. Never deletes; on a name clash on the
     Desktop the copy is kept with a '(NovaDroid)' suffix so nothing is clobbered.
+
+    Executable-shaped names are refused (a malicious app can stage
+    `Cleanup Tool.lnk` in /sdcard/NovaDroid-Shared and hope the operator
+    double-clicks it — the Desktop is the one place that lure goes live),
+    and symlinks/reparse points are never copied out.
     """
     if not names:
         return {"ok": False, "err": "no files selected"}
@@ -283,27 +316,41 @@ def export_to_desktop(paths: ToolPaths, serial: str, names: list[str],
         src_dir = device_mirror_dir()
     else:
         src_dir = desktop_dir()
-    copied, failed = [], []
+    copied, failed, refused = [], [], []
     for n in names:
-        clean = Path(n).name
+        clean = _dev_name(n)
         if not clean:
             continue
+        if clean.lower().endswith(EXECUTABLE_EXTS):
+            refused.append(clean)
+            continue
         src = src_dir / clean
-        if not src.exists() or not src.is_file():
+        if not src.exists() or not src.is_file() or src.is_symlink():
             failed.append(clean)
             continue
         target = dst / clean
         if target.exists():
-            target = dst / f"{src.stem} (NovaDroid){src.suffix}"
+            # Re-exports must not overwrite an earlier (NovaDroid) copy.
+            i = 2
+            cand = dst / f"{src.stem} (NovaDroid){src.suffix}"
+            while cand.exists():
+                cand = dst / f"{src.stem} (NovaDroid) {i}{src.suffix}"
+                i += 1
+            target = cand
         try:
             shutil.copy2(src, target)
             copied.append(target.name)
         except Exception:
             failed.append(clean)
-    out: dict = {"ok": not failed, "desktop": str(dst),
+    out: dict = {"ok": not (failed or refused), "desktop": str(dst),
                  "source": source, "copied": copied}
-    if failed:
-        out["err"] = f"not found/refused: {', '.join(failed)}"
+    if failed or refused:
+        bits = []
+        if failed:
+            bits.append(f"not found/refused: {', '.join(failed)}")
+        if refused:
+            bits.append(f"executable files not exported: {', '.join(refused)}")
+        out["err"] = "; ".join(bits)
     return out
 
 
@@ -318,37 +365,64 @@ def list_device(paths: ToolPaths, serial: str) -> dict:
             "files": [l for l in r["out"].splitlines() if l.strip()]}
 
 
+#: Windows integrates these extensions with the shell — a double-click runs
+#: code. Staged device/browser files with these names are refused on upload
+#: AND on export-to-Desktop, where the lure actually gets clicked.
+EXECUTABLE_EXTS = (".exe", ".bat", ".cmd", ".ps1", ".scr", ".pif", ".com",
+                   ".hta", ".lnk", ".vbs", ".vbe", ".js", ".jse", ".wsf",
+                   ".wsh", ".msi", ".msp", ".mst", ".cpl", ".jar", ".gadget",
+                   ".diagcab", ".diagcfg", ".diagpack")
+
+
 def upload(name: str, b64: str, paths: ToolPaths | None = None,
            push_serial: str = "") -> dict:
-    """Browser upload -> Desktop/ staging (optionally straight onto the device)."""
+    """Browser upload -> Desktop/ staging (optionally straight onto the device).
+
+    `host_path` is intentionally returned: the dashboard hands it straight
+    back to /api/apk/install and /api/apk/analyze, both of which re-validate
+    it with `safe.apk_path()` before touching the filesystem.
+    """
     import base64 as _b64
-    safe = Path(name).name  # strip any path the browser sent
-    if not safe or safe in (".", ".."):
+    if not isinstance(name, str) or safe.has_control(name) or len(name) > 255:
+        return {"ok": False, "err": "bad file name"}
+    clean = safe.safe_filename(name)
+    if not clean or clean in (".", "..") or clean.lower().endswith(EXECUTABLE_EXTS):
         return {"ok": False, "err": "bad file name"}
     try:
-        raw = _b64.b64decode(b64, validate=True)
+        raw = _b64.b64decode(b64 or "", validate=True)
     except Exception:
         return {"ok": False, "err": "not valid base64"}
     if len(raw) > MAX_UPLOAD_MB * 1024 * 1024:
         return {"ok": False, "err": f"over {MAX_UPLOAD_MB}MB cap"}
-    fp = desktop_dir() / safe
-    fp.write_bytes(raw)
-    out: dict = {"ok": True, "file": safe, "bytes": len(raw), "folder": "Desktop"}
+    fp = _confine(desktop_dir(), clean)
+    if fp is None:
+        return {"ok": False, "err": "bad file name"}
+    try:
+        fp.write_bytes(raw)
+    except OSError:
+        return {"ok": False, "err": "could not write the uploaded file"}
+    out: dict = {"ok": True, "file": clean, "bytes": len(raw), "folder": "Desktop",
+                "host_path": str(fp)}
     if paths and push_serial:
-        pr = push(paths, push_serial, [safe])
+        pr = push(paths, push_serial, [clean])
         out["pushed"] = pr.get("ok", False)
     return out
 
 
 def reveal(which: str = "") -> dict:
-    """Open the shared folder (or a subfolder) in Explorer (Windows)."""
+    """Open the shared folder (or a subfolder) in Explorer (Windows).
+
+    OPT-IN ONLY: the router refuses this endpoint unless the agent was
+    started with --allow-gui. A REST API should not be able to spawn a GUI
+    window on the operator's desktop by default.
+    """
     import subprocess as _sp
     target = shared_dir() / Path(which).name if which in ("Desktop", "Device") else shared_dir()
     try:
         _sp.Popen(["explorer", str(target)])
         return {"ok": True}
-    except Exception as e:
-        return {"ok": False, "err": str(e)}
+    except OSError:
+        return {"ok": False, "err": "could not open Explorer on this host"}
 
 
 def _delete_where(base: Path, names: list[str]) -> tuple[list, list]:
@@ -456,62 +530,88 @@ def mirror(paths: ToolPaths, serial: str, direction: str) -> dict:
 
 
 # --- auto-sync: push Desktop/ + reconcile Device/ while online ---
+def _job_set(job: dict, **kv) -> None:
+    """Job dicts are read by the HTTP thread and written by a worker thread."""
+    with _SYNC_JOBS_LOCK:
+        job.update(kv)
+
+
 def _job_tick(paths: ToolPaths, serial: str, job: dict) -> None:
     """One mirror pass. Records telemetry so the UI can show what happened."""
-    job["last_run"] = time.time()
+    _job_set(job, last_run=time.time())
     try:
         if not _online(paths, serial):
-            job["waiting"] = True
-            job["last_result"] = f"waiting for {serial} (offline)"
+            _job_set(job, waiting=True,
+                     last_result=f"waiting for {serial} (offline)")
             return
-        job["waiting"] = False
+        _job_set(job, waiting=False)
         pr = push(paths, serial)
         pl = pull(paths, serial)
         if pr.get("ok") and pl.get("ok"):
             n = len(pr.get("pushed", [])) + len(pl.get("pulled", []))
-            job["last_result"] = f"synced both ways ✓ ({n} new)" if n else "in sync ✓"
+            _job_set(job, last_result=f"synced both ways ✓ ({n} new)" if n
+                     else "in sync ✓")
         else:
-            job["last_result"] = ("push: " + (pr.get("err") or "ok")
-                                  + " · pull: " + (pl.get("err") or "ok"))
-    except Exception as e:
-        job["last_result"] = f"error: {e}"
+            _job_set(job, last_result="push: " + (pr.get("err") or "ok")
+                     + " · pull: " + (pl.get("err") or "ok"))
+    except Exception as ex:
+        # Generic to the client, detailed only in the agent's console.
+        print(f"[autosync] tick failed ({type(ex).__name__}): {ex}")
+        _job_set(job, last_result="sync failed — see agent console")
 
 
 def autosync_set(paths: ToolPaths, serial: str, on: bool, interval: int = 15) -> dict:
-    old = _SYNC_JOBS.pop(serial, None) if serial else None
+    with _SYNC_JOBS_LOCK:
+        old = _SYNC_JOBS.pop(serial, None) if serial else None
     if old:
-        old["stop"].set()
+        old["stop"].set()          # the OLD loop exits without deleting the NEW job
     if not on:
         return {"ok": True, "autosync": False}
     if not serial:
         return {"ok": False,
                 "err": "Pick a device first (Quickboot an AVD) — nothing to sync with."}
+    if not safe.valid_serial(serial):
+        return {"ok": False, "err": "invalid device serial"}
+    try:
+        interval = max(5, min(int(interval or 15), 300))
+    except (TypeError, ValueError):
+        return {"ok": False, "err": "sync interval must be a number"}
     stop = threading.Event()
-    interval = max(5, min(int(interval or 15), 300))
     job = {"stop": stop, "interval": interval, "since": time.time(),
            "last_run": 0, "last_result": "starting…", "waiting": True}
 
     def _loop():
-        while not stop.wait(interval):
-            _job_tick(paths, serial, job)
-            if stop.is_set():
-                break
-        _SYNC_JOBS.pop(serial, None)
+        try:
+            while not stop.wait(interval):
+                _job_tick(paths, serial, job)
+                if stop.is_set():
+                    break
+        finally:
+            # v4 bug: an old loop that was still winding down popped the
+            # freshly registered job for the same serial. Only remove self.
+            with _SYNC_JOBS_LOCK:
+                if _SYNC_JOBS.get(serial) is job:
+                    _SYNC_JOBS.pop(serial, None)
 
-    _SYNC_JOBS[serial] = job
-    threading.Thread(target=_loop, daemon=True).start()
-    state = "online — syncing" if _online(paths, serial) else f"armed, waiting for {serial} to come online"
+    with _SYNC_JOBS_LOCK:
+        _SYNC_JOBS[serial] = job
+    threading.Thread(target=_loop, daemon=True,
+                     name=f"nova-autosync-{serial}").start()
+    state = ("online — syncing" if _online(paths, serial)
+             else f"armed, waiting for {serial} to come online")
     return {"ok": True, "autosync": True, "interval": interval,
             "note": f"{state}. Desktop/ pushes up, Device/ mirrors down, every {interval}s."}
 
 
 def autosync_status() -> dict:
-    return {"ok": True, "jobs": {
-        k: {"interval": v["interval"], "since": v["since"],
-            "last_run": v.get("last_run", 0),
-            "last_result": v.get("last_result", ""),
-            "waiting": v.get("waiting", True)}
-        for k, v in _SYNC_JOBS.items()}}
+    with _SYNC_JOBS_LOCK:
+        jobs = {
+            k: {"interval": v["interval"], "since": v["since"],
+                "last_run": v.get("last_run", 0),
+                "last_result": v.get("last_result", ""),
+                "waiting": v.get("waiting", True)}
+            for k, v in _SYNC_JOBS.items()}
+    return {"ok": True, "jobs": jobs}
 
 
 def sync_now(paths: ToolPaths, serial: str) -> dict:

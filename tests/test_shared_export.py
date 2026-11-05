@@ -35,8 +35,7 @@ class TempHome:
 
 class TestExportToDesktop(unittest.TestCase):
     def test_rejects_empty_selection(self):
-        with tempfile.TemporaryDirectory() as td:
-            self.assertFalse(SHARE.export_to_desktop(PATHS, "", [], "pc")["ok"])
+        self.assertFalse(SHARE.export_to_desktop(PATHS, "", [], "pc")["ok"])
 
     def test_export_pc_copies_to_real_desktop(self):
         with tempfile.TemporaryDirectory() as td, TempHome(td):

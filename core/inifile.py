@@ -8,19 +8,24 @@ them happily rewrote commented-out keys). Everything goes through here now.
 Contract, tuned to how the Android emulator actually reads these files:
   * comments (`#` / `;`) and section headers are preserved verbatim and are
     NEVER treated as a match — a commented-out `window.y` must stay a comment
-  * an existing key is rewritten in place, keeping its position in the file
+  * an existing key is rewritten at its FIRST occurrence; later duplicate
+    lines for the same key are dropped, so a legacy file that already
+    contains two `hw.ramSize` lines comes out deduplicated
   * a missing key is appended at the end
   * no key is ever duplicated, no matter how many times you upsert it
   * the file always ends with exactly one trailing newline
+  * writes are atomic (temp file + os.replace) and serialised per process,
+    so two concurrent upserts to one config.ini cannot lose an update
   * OSError propagates so callers can turn it into a JSON `err`
 """
 from __future__ import annotations
 
+import os
+import tempfile
+import threading
 from pathlib import Path
 
-
-def lines_of(text: str) -> list[str]:
-    return text.splitlines()
+_WRITE_LOCK = threading.Lock()
 
 
 def _split(line: str) -> tuple[str, str] | None:
@@ -40,22 +45,23 @@ def _split(line: str) -> tuple[str, str] | None:
     return k, v.strip()
 
 
-def parse(path: Path) -> dict[str, str]:
-    """Read an ini into a dict. Missing file -> {}. Never raises."""
+def parse_text(text: str) -> dict[str, str]:
+    """Parse ini TEXT into a dict (the file-less half of `parse`)."""
     out: dict[str, str] = {}
-    try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
-    except (OSError, ValueError):
-        return out
-    for line in text.splitlines():
+    for line in (text or "").splitlines():
         kv = _split(line)
         if kv:
             out[kv[0]] = kv[1]
     return out
 
 
-def get(path: Path, key: str, default: str | None = None) -> str | None:
-    return parse(path).get(key, default)
+def parse(path: Path) -> dict[str, str]:
+    """Read an ini into a dict. Missing file -> {}. Never raises."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except (OSError, ValueError):
+        return {}
+    return parse_text(text)
 
 
 def upsert(path: Path, kv: dict[str, str]) -> str:
@@ -64,40 +70,39 @@ def upsert(path: Path, kv: dict[str, str]) -> str:
     Returns the resulting file text (handy for assertions). Raises OSError
     if the file cannot be written — callers decide how to report that.
     """
-    lines: list[str] = []
-    if path.exists():
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    with _WRITE_LOCK:
+        lines: list[str] = []
+        if path.exists():
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
 
-    out: list[str] = []
-    seen: set[str] = set()
-    for line in lines:
-        kvline = _split(line)
-        if kvline and kvline[0] in kv:
-            out.append(f"{kvline[0]}={kv[kvline[0]]}")
-            seen.add(kvline[0])
-        else:
-            out.append(line)
+        out: list[str] = []
+        seen: set[str] = set()
+        for line in lines:
+            kvline = _split(line)
+            if kvline and kvline[0] in kv:
+                if kvline[0] in seen:
+                    continue          # dedupe a pre-existing double key
+                out.append(f"{kvline[0]}={kv[kvline[0]]}")
+                seen.add(kvline[0])
+            else:
+                out.append(line)
 
-    for k, v in kv.items():
-        if k not in seen:
-            out.append(f"{k}={v}")
+        for k, v in kv.items():
+            if k not in seen:
+                out.append(f"{k}={v}")
 
-    text = "\n".join(out).rstrip("\n") + "\n"
-    path.write_text(text, encoding="utf-8")
-    return text
-
-
-def delete(path: Path, keys: list[str]) -> str:
-    """Remove keys (and their comment-free assignment lines) from `path`."""
-    if not path.exists():
-        return ""
-    wanted = set(keys)
-    out: list[str] = []
-    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        kv = _split(line)
-        if kv and kv[0] in wanted:
-            continue
-        out.append(line)
-    text = "\n".join(out).rstrip("\n") + "\n"
-    path.write_text(text, encoding="utf-8")
-    return text
+        text = "\n".join(out).rstrip("\n") + "\n"
+        # Write-then-replace: a crash mid-write must not leave a truncated
+        # config.ini behind (the emulator refuses to boot an AVD from one).
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+                fh.write(text)
+            os.replace(tmp, path)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        return text

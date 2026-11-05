@@ -11,14 +11,37 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
 
+from . import safe
 from .config import ToolPaths
 from .runner import run, run_bytes, try_json
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+PNG_IEND = b"IEND\xaeB`\x82"
+#: Android system property names: `ro.build.version.sdk`, `qemu.gles`, ...
+_PROP_RE = re.compile(r"[A-Za-z0-9_.\-]+")
+
+
+def _is_png(data: bytes) -> bool:
+    """A frame is only a frame if it is a complete PNG.
+
+    `adb exec-out` happily returns a truncated buffer (or adb's own error
+    text) with exit code 0, and the old one-line `and`/`or` chain was both
+    precedence-fragile and accepted any 1 KB blob starting with the magic —
+    so a half-written frame could reach the browser and render as a broken
+    image instead of falling through to the next capture tier.
+    """
+    if not data or len(data) < 1024:
+        return False
+    if not data.startswith(PNG_MAGIC):
+        return False
+    # A well-formed PNG ends with the IEND chunk; tolerate trailing bytes
+    # (some adb builds append a newline) but require the marker to exist.
+    return PNG_IEND in data[-16:]
 
 
 def _check(paths: ToolPaths, serial: str) -> dict | None:
@@ -26,6 +49,12 @@ def _check(paths: ToolPaths, serial: str) -> dict | None:
         return {"ok": False, "err": "adb not found"}
     if not serial:
         return {"ok": False, "err": "no device selected — Quickboot an AVD first"}
+    # `serial` arrives straight from a dashboard JSON body. Even though
+    # subprocess uses shell=False, an arbitrary string after `-s` can be read
+    # as an adb option or a different target; validate at the lowest layer so
+    # every ADB wrapper inherits the same rule.
+    if not safe.valid_serial(serial):
+        return {"ok": False, "err": "invalid device serial"}
     return None
 
 
@@ -62,28 +91,56 @@ def devices(paths: ToolPaths) -> dict:
     return {"ok": True, "devices": devs}
 
 
-def device_props(paths: ToolPaths, serial: str) -> dict:
+#: (short key used by the dashboard, full Android property name)
+DEVICE_PROPS: tuple[tuple[str, str], ...] = (
+    ("model", "ro.product.model"),
+    ("android", "ro.build.version.release"),
+    ("sdk", "ro.build.version.sdk"),
+    ("abi", "ro.product.cpu.abi"),
+    ("abilist", "ro.product.cpu.abilist"),
+    ("bridge", "ro.dalvik.vm.native.bridge"),
+)
+
+
+def getprops(paths: ToolPaths, serial: str, props: list[str] | tuple[str, ...]) -> dict:
+    """Read many system properties in ONE adb round-trip.
+
+    Each `adb shell` costs ~150 ms; reading six properties the old way spent
+    ~900 ms per device, and with a 4-instance fleet open that was nearly four
+    seconds of the dashboard doing nothing. One shell invocation that walks
+    the list is ~150 ms regardless of how many we ask for.
+
+    Prints `key=value` per line rather than bare values: an unset property
+    emits an empty line, and positional zip() then shifts every later field
+    by one — which is how `sdk` used to be read as `abi`.
+    """
+    if not paths.adb or not serial or not props:
+        return {}
+    if not safe.valid_serial(serial):
+        return {}
+    # v4 interpolated the property names raw into a `for p in ...; do` loop.
+    # Every current caller uses a hardcoded list, but that makes the safety of
+    # this function depend on all future callers remembering the rule. Only
+    # Android property syntax is legal here, and each word is POSIX-quoted so
+    # an accidental `;`, backtick or glob can never become device shell code.
+    props = [str(p) for p in props[:64]]
+    if any(not _PROP_RE.fullmatch(p) for p in props):
+        return {}
+    quoted = " ".join(safe.sh_quote(p) for p in props)
+    script = f'for p in {quoted}; do v=$(getprop "$p"); echo "$p=$v"; done'
+    r = run([paths.adb, "-s", serial, "shell", script], timeout=25)
     out: dict = {}
-    if not paths.adb or not serial:
-        return out
-    script = ("getprop ro.product.model; getprop ro.build.version.release; "
-              "getprop ro.build.version.sdk; getprop ro.product.cpu.abi; "
-              "getprop ro.product.cpu.abilist; getprop ro.dalvik.vm.native.bridge")
-    r = run([paths.adb, "-s", serial, "shell", script], timeout=20)
-    vals = [v.strip() for v in r["out"].splitlines()]
-    keys = ("model", "android", "sdk", "abi", "abilist", "bridge")
-    for k, v in zip(keys, vals):
-        if v:
+    for line in r["out"].splitlines():
+        k, _, v = line.partition("=")
+        k, v = k.strip(), v.strip()
+        if k in props and v:
             out[k] = v
     return out
 
 
-def online(paths: ToolPaths, serial: str) -> bool:
-    if not paths.adb or not serial:
-        return False
-    r = run([paths.adb, "devices"], timeout=10)
-    return any(parts[:2] == [serial, "device"]
-               for parts in (l.split() for l in r["out"].splitlines()))
+def device_props(paths: ToolPaths, serial: str) -> dict:
+    raw = getprops(paths, serial, [p for _, p in DEVICE_PROPS])
+    return {short: raw[full] for short, full in DEVICE_PROPS if raw.get(full)}
 
 
 # --------------------------------------------------------------------------
@@ -92,9 +149,11 @@ def online(paths: ToolPaths, serial: str) -> bool:
 def install_apk(paths: ToolPaths, serial: str, apk_path: str) -> dict:
     if (e := _check(paths, serial)):
         return e
-    p = Path(apk_path or "")
-    if not p.exists():
-        return {"ok": False, "err": f"APK not found: {apk_path}"}
+    # v4 accepted ANY host path, so a remote dashboard could probe for the
+    # existence of arbitrary files and read the absolute path back in `err`.
+    p, err = safe.apk_path(apk_path)
+    if err:
+        return {"ok": False, "err": err}
     if paths.android_cli:
         r = run([paths.android_cli, "install", "--device", serial,
                  "--apks", str(p)], timeout=300)
@@ -106,37 +165,80 @@ def install_apk(paths: ToolPaths, serial: str, apk_path: str) -> dict:
                      "granted); no 'unknown sources' prompt needed.")}
 
 
+def install_apk_all(paths: ToolPaths, apk_path: str) -> dict:
+    """Install one APK on EVERY online emulator, in parallel.
+
+    Multi-instance farming and QA fleets want "same build everywhere", not
+    eight rounds of pick-device → install. Serial installs made a 5-instance
+    fleet wait ~5 × install-time; parallel brings it to one install-time.
+    """
+    if not paths.adb:
+        return {"ok": False, "err": "adb not found"}
+    p, err = safe.apk_path(apk_path)
+    if err:
+        return {"ok": False, "err": err}
+    r = run([paths.adb, "devices"], timeout=15)
+    serials = [parts[0] for parts in (l.split() for l in r["out"].splitlines())
+               if len(parts) >= 2 and parts[1] == "device"
+               and parts[0].startswith("emulator-")]
+    if not serials:
+        return {"ok": False, "err": "no online emulator devices — Quickboot one first"}
+
+    def _one(s: str) -> dict:
+        res = install_apk(paths, s, str(p))
+        return {"serial": s, "ok": bool(res.get("ok")),
+                "err": res.get("err", "") or ("" if res.get("ok") else res.get("log", "")[-200:])}
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(8, len(serials))) as pool:
+        results = list(pool.map(_one, serials))
+    good = [x["serial"] for x in results if x["ok"]]
+    return {"ok": len(good) == len(results), "installed": good,
+            "failed": [x for x in results if not x["ok"]],
+            "count": len(good), "total": len(results), "parallel": True}
+
+
 # --------------------------------------------------------------------------
 # Screenshots
 # --------------------------------------------------------------------------
-def screenshot(paths: ToolPaths, serial: str) -> dict:
-    """Returns {ok, png_b64}. Three tiers, fastest first.
+def screenshot_bytes(paths: ToolPaths, serial: str) -> dict:
+    """Returns {ok, png} with RAW PNG bytes. Three tiers, fastest first.
 
       1. `adb exec-out screencap -p`  — 1 process, no temp file, binary-safe.
       2. `screencap` to /sdcard + `pull` — works on ancient adb.
       3. `android screen capture` CLI — last resort.
+
+    The MJPEG stream and /api/screen consume this directly: base64-encoding a
+    500 KB frame just so the server can immediately decode it again costs
+    ~8 ms CPU per frame, which at 10 fps is real money on the frame budget.
     """
     if (e := _check(paths, serial)):
         return e
 
     rb = run_bytes([paths.adb, "-s", serial, "exec-out", "screencap", "-p"], timeout=25)
     data = rb["out"] or b""
-    if data.startswith(PNG_MAGIC) and data[-8:] == b"IEND\xaeB`\x82" or \
-            (data.startswith(PNG_MAGIC) and len(data) > 1024):
-        return {"ok": True, "png_b64": base64.b64encode(data).decode(),
-                "bytes": len(data), "via": "exec-out"}
+    if _is_png(data):
+        return {"ok": True, "png": data, "bytes": len(data), "via": "exec-out"}
 
-    with tempfile.TemporaryDirectory() as td:
-        fp = os.path.join(td, "s.png")
-        r1 = run([paths.adb, "-s", serial, "shell", "screencap", "-p", "/sdcard/s.png"],
-                 timeout=30)
-        if r1["ok"]:
-            run([paths.adb, "-s", serial, "pull", "/sdcard/s.png", fp], timeout=30)
-        if os.path.exists(fp):
-            raw = Path(fp).read_bytes()
-            if raw.startswith(PNG_MAGIC):
-                return {"ok": True, "png_b64": base64.b64encode(raw).decode(),
-                        "bytes": len(raw), "via": "screencap+pull"}
+    # v4 used the FIXED path /sdcard/s.png. Two concurrent captures (a live
+    # MJPEG stream plus a one-off screenshot, or two browser tabs) then pulled
+    # each other's half-written file and left stale PNGs on the device forever.
+    # A per-call name removes the race and `finally` always cleans up.
+    remote = f"/sdcard/nd-shot-{os.getpid()}-{time.time_ns()}.png"
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            fp = os.path.join(td, "s.png")
+            r1 = run([paths.adb, "-s", serial, "shell", "screencap", "-p", remote],
+                     timeout=30)
+            if r1["ok"]:
+                run([paths.adb, "-s", serial, "pull", remote, fp], timeout=30)
+            if os.path.exists(fp):
+                raw = Path(fp).read_bytes()
+                if _is_png(raw):
+                    return {"ok": True, "png": raw, "bytes": len(raw),
+                            "via": "screencap+pull"}
+    finally:
+        run([paths.adb, "-s", serial, "shell", "rm", "-f", remote], timeout=15)
 
     if paths.android_cli:
         with tempfile.TemporaryDirectory() as td:
@@ -145,10 +247,23 @@ def screenshot(paths: ToolPaths, serial: str) -> dict:
                 timeout=30)
             if os.path.exists(fp):
                 raw = Path(fp).read_bytes()
-                if raw.startswith(PNG_MAGIC):
-                    return {"ok": True, "png_b64": base64.b64encode(raw).decode(),
-                            "bytes": len(raw), "via": "android-cli"}
-    return {"ok": False, "err": (rb["err"] or "screencap produced no PNG")[-400:]}
+                if _is_png(raw):
+                    return {"ok": True, "png": raw, "bytes": len(raw), "via": "android-cli"}
+    # `rb["err"]` can contain adb's own diagnostics (device offline, permission
+    # denied, protocol error). Keep them — they are useful — but never let a
+    # raw subprocess message of unbounded length reach the dashboard.
+    return {"ok": False,
+            "err": (rb["err"] or "screencap produced no PNG "
+                    "(device offline or capture blocked)")[-200:]}
+
+
+def screenshot(paths: ToolPaths, serial: str) -> dict:
+    """Returns {ok, png_b64} — the JSON-safe wrapper over screenshot_bytes."""
+    r = screenshot_bytes(paths, serial)
+    if not r.get("ok"):
+        return r
+    return {"ok": True, "png_b64": base64.b64encode(r["png"]).decode(),
+            "bytes": r["bytes"], "via": r["via"]}
 
 
 def layout(paths: ToolPaths, serial: str) -> dict:
@@ -174,6 +289,11 @@ def _clamp_int(value, lo: int, hi: int, default: int = 0) -> int:
         return max(lo, min(int(float(value)), hi))
     except (TypeError, ValueError):
         return default
+    except OverflowError:
+        # json accepts bare Infinity/NaN and int(float("inf")) raises
+        # OverflowError — one uncaught exception turned a tap into a 500.
+        # Infinity clamps to the bound it is reaching for.
+        return hi if float(value) > 0 else lo
 
 
 def tap(paths: ToolPaths, serial: str, x, y) -> dict:
@@ -199,15 +319,39 @@ def long_press(paths: ToolPaths, serial: str, x, y, ms: int = 1000) -> dict:
 
 
 def input_text(paths: ToolPaths, serial: str, text: str) -> dict:
-    """Type text. Spaces become %s (adb's escape), which is what `input text`
-    expects; everything else is percent-decoded by the device."""
+    """Type text, preserving spaces and apostrophes.
+
+    `input text` runs through the device shell — adb joins argv with spaces
+    and hands the whole line to `/system/bin/sh -c` — so the payload MUST be
+    wrapped in double quotes with the characters the shell re-interprets
+    inside them ($ ` \\ ") escaped. The old version replaced spaces with %s
+    and DELETED apostrophes outright; a v4 interim build escaped the right
+    four characters but never added the quotes, so `x; reboot` executed as
+    two shell commands. `input` itself does exactly one substitution on the
+    final argument (`%s` -> space; verified in AOSP `Input.sendText`), so a
+    literal % must NOT be doubled — `50%% done` used to arrive typed as
+    "50%% done".
+    """
     if (e := _check(paths, serial)):
         return e
     text = str(text or "")
     if not text:
         return {"ok": False, "err": "no text given"}
-    payload = text.replace(" ", "%s").replace("'", "")[:400]
-    return run([paths.adb, "-s", serial, "shell", "input", "text", payload], timeout=20)
+    # A newline/NUL inside a double-quoted remote word is the one case the
+    # escaping below cannot make safe: adb joins argv and hands the string to
+    # sh -c, where an embedded control char can terminate the command. Refuse
+    # control characters instead of trying to escape them.
+    if safe.has_control(text):
+        return {"ok": False, "err": "text contains control characters"}
+    if len(text) > 400:
+        text = text[:400]
+    # Inside double quotes only \\, ", $ and ` are re-interpreted by sh; `;`,
+    # `|`, `&`, parens and redirects stay literal. Escaping those four plus
+    # the surrounding quotes is therefore complete.
+    payload = '"' + (text.replace("\\", "\\\\").replace("$", "\\$")
+                     .replace("`", "\\`").replace('"', '\\"')) + '"'
+    return run([paths.adb, "-s", serial, "shell", "input", "text", payload],
+               timeout=20)
 
 
 def keyevent(paths: ToolPaths, serial: str, code) -> dict:
@@ -334,12 +478,22 @@ def perf(paths: ToolPaths, serial: str) -> dict:
 
 
 def shell(paths: ToolPaths, serial: str, cmd: str) -> dict:
-    """Guarded adb shell (blocks obvious destructive ops)."""
+    """Arbitrary adb shell. OPT-IN ONLY.
+
+    The v4 blacklist was never a security boundary — `sh -c` has hundreds of
+    ways to express the same destructive command, and an authenticated
+    operator is already trusted with `install`, `wipe` and `shell`. The real
+    control is the router: `/api/shell` is disabled unless the agent was
+    started with `--allow-shell`. The blacklist stays as seat-belt-only.
+    """
     if (e := _check(paths, serial)):
         return e
+    cmd = str(cmd or "")
+    if not cmd or len(cmd) > 2000 or safe.has_control(cmd):
+        return {"ok": False, "err": "invalid shell command"}
     banned = ["reboot -p", "rm -rf /", "mkfs", "dd if=", ":(){:|:&};:",
-              "wipe", "format ", "fastboot"]
-    low = (cmd or "").lower()
+              "wipe", "format ", "fastboot", "rm -rf /sdcard", "> /dev/block"]
+    low = cmd.lower()
     if any(b in low for b in banned):
         return {"ok": False, "err": "blocked by safety filter"}
     r = run([paths.adb, "-s", serial, "shell", cmd], timeout=45)
@@ -397,11 +551,24 @@ def _safe_macro_name(name: str) -> str:
     return "".join(c for c in str(name or "") if c.isalnum() or c in "-_")[:64]
 
 
+#: Windows reserves these device names with any extension (pre-Win11 and
+#: NTFS long-path edge cases); writing "CON.json" can fail or poke a device.
+_MACRO_RESERVED = {"con", "prn", "aux", "nul",
+                   *(f"com{i}" for i in range(1, 10)),
+                   *(f"lpt{i}" for i in range(1, 10))}
+
+
 def macro_save(name: str, steps: list) -> dict:
     safe = _safe_macro_name(name) or "macro"
+    if safe.lower() in _MACRO_RESERVED:
+        return {"ok": False, "err": f"'{safe}' is a reserved Windows name — pick another"}
     good, bad = _validate_steps(steps)
     fp = MACRO_DIR / f"{safe}.json"
-    fp.write_text(json.dumps({"name": safe, "steps": good}, indent=1), encoding="utf-8")
+    try:
+        fp.write_text(json.dumps({"name": safe, "steps": good}, indent=1),
+                      encoding="utf-8")
+    except OSError as e:
+        return {"ok": False, "err": f"could not save macro: {e}"}
     return {"ok": True, "file": str(fp), "steps": len(good), "rejected": bad}
 
 
@@ -438,8 +605,14 @@ def macro_delete(name: str) -> dict:
         return {"ok": False, "err": str(e)}
 
 
-def macro_run(paths: ToolPaths, serial: str, name: str) -> dict:
-    """Replay tap/swipe/text/key/sleep steps via adb input."""
+def macro_run(paths: ToolPaths, serial: str, name: str,
+              loops: int = 1, loop_delay_s: float = 1.0) -> dict:
+    """Replay tap/swipe/text/key/sleep steps via adb input.
+
+    `loops` repeats the whole macro N times (LDPlayer-style repeat) with
+    `loop_delay_s` between passes — the standard shape of a farm choreography
+    ("do the daily, wait, do it again on the next instance").
+    """
     if (e := _check(paths, serial)):
         return e
     safe = _safe_macro_name(name)
@@ -450,24 +623,33 @@ def macro_run(paths: ToolPaths, serial: str, name: str) -> dict:
         d = json.loads(fp.read_text(encoding="utf-8"))
     except Exception as ex:
         return {"ok": False, "err": f"macro is unreadable: {ex}"}
+    loops = max(1, min(int(loops or 1), 500))
+    loop_delay_s = max(0.0, min(float(loop_delay_s or 0.0), 300.0))
     log: list[str] = []
-    for i, st in enumerate(d.get("steps", [])):
-        t = st.get("type")
-        if t == "tap":
-            r = tap(paths, serial, st["x"], st["y"])
-        elif t == "swipe":
-            r = swipe(paths, serial, st["x1"], st["y1"], st["x2"], st["y2"],
-                      st.get("ms", 300))
-        elif t == "text":
-            r = input_text(paths, serial, st["text"])
-        elif t == "key":
-            r = keyevent(paths, serial, st["code"])
-        elif t == "sleep":
-            time.sleep(float(st.get("s", 1)))
-            log.append("sleep ok")
-            continue
-        else:
-            log.append(f"skip unknown {t}")
-            continue
-        log.append(f"{i}:{t} {'ok' if r.get('ok') else 'FAIL'}")
-    return {"ok": True, "log": log, "macro": safe}
+    ok_steps = 0
+    for run_i in range(loops):
+        if run_i and loop_delay_s:
+            time.sleep(loop_delay_s)
+        for i, st in enumerate(d.get("steps", [])):
+            t = st.get("type")
+            if t == "tap":
+                r = tap(paths, serial, st["x"], st["y"])
+            elif t == "swipe":
+                r = swipe(paths, serial, st["x1"], st["y1"], st["x2"], st["y2"],
+                          st.get("ms", 300))
+            elif t == "text":
+                r = input_text(paths, serial, st["text"])
+            elif t == "key":
+                r = keyevent(paths, serial, st["code"])
+            elif t == "sleep":
+                time.sleep(float(st.get("s", 1)))
+                log.append("sleep ok")
+                continue
+            else:
+                log.append(f"skip unknown {t}")
+                continue
+            if r.get("ok"):
+                ok_steps += 1
+            log.append(f"{run_i}:{i}:{t} {'ok' if r.get('ok') else 'FAIL'}")
+    return {"ok": True, "log": log[-500:], "macro": safe, "loops": loops,
+            "steps_ok": ok_steps}

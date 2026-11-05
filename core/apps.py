@@ -17,11 +17,14 @@ import threading
 import time
 from pathlib import Path
 
+from . import safe
 from .config import ToolPaths
 from .runner import run
 
 # Anything that could break out into a second remote command is refused.
-_SHELL_DENY = re.compile(r"[;&|`$]|&&|\|\||\n|\r")
+# v5 also blocks redirects: `> /sdcard/x` needs no shell metacharacter other
+# than `>` and was enough to overwrite arbitrary guest files.
+_SHELL_DENY = re.compile(r"[;&|`$<>]|&&|\|\||\n|\r|\x00")
 
 
 def _sh(paths: ToolPaths, serial: str, script: str, timeout: int = 30) -> dict:
@@ -30,6 +33,8 @@ def _sh(paths: ToolPaths, serial: str, script: str, timeout: int = 30) -> dict:
         return {"ok": False, "err": "adb not found"}
     if not serial:
         return {"ok": False, "err": "no device selected — Quickboot an AVD first"}
+    if not safe.valid_serial(serial):
+        return {"ok": False, "err": "invalid device serial"}
     return run([paths.adb, "-s", serial, "shell", script], timeout=timeout)
 
 
@@ -41,9 +46,20 @@ def _safe(text: str, limit: int = 500) -> str | None:
     return None if _SHELL_DENY.search(text) else text
 
 
+def _pkg(package) -> str | None:
+    """An Android application ID — never an arbitrary shell fragment."""
+    p = str(package or "").strip()
+    return p if safe.valid_package(p) else None
+
+
 def _dq(text: str) -> str:
-    """Escape for a double-quoted remote shell word."""
-    return text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+    r"""Escape for a double-quoted remote shell word.
+
+    v4 forgot the backtick: `cmd clipboard set "\`id\`"` executed `id` inside
+    the double quotes. Inside `"…"` only \\, ", $ and ` are re-interpreted.
+    """
+    return (text.replace("\\", "\\\\").replace('"', '\\"')
+            .replace("$", "\\$").replace("`", "\\`"))
 
 
 def _check(paths: ToolPaths, serial: str) -> dict | None:
@@ -51,6 +67,8 @@ def _check(paths: ToolPaths, serial: str) -> dict | None:
         return {"ok": False, "err": "adb not found"}
     if not serial:
         return {"ok": False, "err": "no device selected — Quickboot an AVD first"}
+    if not safe.valid_serial(serial):
+        return {"ok": False, "err": "invalid device serial"}
     return None
 
 
@@ -92,13 +110,15 @@ def boot_state(paths: ToolPaths, serial: str) -> dict:
 def wait_boot(paths: ToolPaths, serial: str, timeout: int = 300) -> dict:
     """Block until sys.boot_completed=1. Used by start_avd to report truth."""
     deadline = time.time() + max(5, min(int(timeout), 900))
+    t0 = time.time()
     seen_online = False
     while time.time() < deadline:
         st = boot_state(paths, serial)
         if st.get("ok"):
             seen_online = True
             if st.get("ready"):
-                return {"ok": True, "booted": True, "waited_s": 0}
+                return {"ok": True, "booted": True,
+                        "waited_s": round(time.time() - t0, 1)}
         time.sleep(2)
     return {"ok": False, "booted": False,
             "err": f"boot did not complete within {timeout}s"
@@ -157,7 +177,7 @@ def list_packages(paths: ToolPaths, serial: str, third_party: bool = True) -> di
 def package_info(paths: ToolPaths, serial: str, package: str) -> dict:
     if (e := _check(paths, serial)):
         return e
-    pkg = _safe(package, 200)
+    pkg = _pkg(package)
     if not pkg:
         return {"ok": False, "err": "invalid package name"}
     r = run([paths.adb, "-s", serial, "shell",
@@ -188,7 +208,7 @@ def launch(paths: ToolPaths, serial: str, package: str) -> dict:
     """
     if (e := _check(paths, serial)):
         return e
-    pkg = _safe(package, 200)
+    pkg = _pkg(package)
     if not pkg:
         return {"ok": False, "err": "invalid package name"}
     r = run([paths.adb, "-s", serial, "shell",
@@ -197,7 +217,9 @@ def launch(paths: ToolPaths, serial: str, package: str) -> dict:
     for line in r["out"].splitlines():
         line = line.strip()
         if "/" in line and line.startswith(pkg):
-            activity = line.split("/", 1)[1]
+            cand = line.split("/", 1)[1].strip()
+            if re.fullmatch(r"[A-Za-z0-9_.$/]+", cand):
+                activity = cand
             break
     if activity:
         res = run([paths.adb, "-s", serial, "shell",
@@ -214,7 +236,7 @@ def launch(paths: ToolPaths, serial: str, package: str) -> dict:
 def stop_app(paths: ToolPaths, serial: str, package: str) -> dict:
     if (e := _check(paths, serial)):
         return e
-    pkg = _safe(package, 200)
+    pkg = _pkg(package)
     if not pkg:
         return {"ok": False, "err": "invalid package name"}
     r = run([paths.adb, "-s", serial, "shell", f"am force-stop {pkg}"], timeout=30)
@@ -225,7 +247,7 @@ def clear_app(paths: ToolPaths, serial: str, package: str) -> dict:
     """Wipe an app's data (keeps the APK installed)."""
     if (e := _check(paths, serial)):
         return e
-    pkg = _safe(package, 200)
+    pkg = _pkg(package)
     if not pkg:
         return {"ok": False, "err": "invalid package name"}
     r = run([paths.adb, "-s", serial, "shell", f"pm clear {pkg}"], timeout=60)
@@ -236,7 +258,7 @@ def clear_app(paths: ToolPaths, serial: str, package: str) -> dict:
 def uninstall(paths: ToolPaths, serial: str, package: str) -> dict:
     if (e := _check(paths, serial)):
         return e
-    pkg = _safe(package, 200)
+    pkg = _pkg(package)
     if not pkg:
         return {"ok": False, "err": "invalid package name"}
     r = run([paths.adb, "-s", serial, "uninstall", pkg], timeout=120)
@@ -250,34 +272,39 @@ def uninstall(paths: ToolPaths, serial: str, package: str) -> dict:
 
 
 def grant_all(paths: ToolPaths, serial: str, package: str) -> dict:
-    """Grant every runtime permission (kills first-run dialogs in QA)."""
+    """Grant every runtime permission (kills first-run dialogs in QA).
+
+    One shell loop, not one adb process per permission: a navigation app
+    requests ~35 permissions, and 35 sequential `adb shell pm grant` calls
+    took ~7 seconds and felt like a hang. The loop is a single round-trip.
+    """
     if (e := _check(paths, serial)):
         return e
-    pkg = _safe(package, 200)
+    pkg = _pkg(package)
     if not pkg:
         return {"ok": False, "err": "invalid package name"}
-    r = run([paths.adb, "-s", serial, "shell",
-             f"pm grant {pkg} android.permission.CAMERA"], timeout=30)
-    perms = run([paths.adb, "-s", serial, "shell",
-                 f"dumpsys package {pkg} | grep -o 'android.permission.[A-Z_.]*' | sort -u"],
-                timeout=40)
-    granted: list[str] = []
-    for p in dict.fromkeys(perms["out"].split()):
-        if not p.startswith("android.permission."):
-            continue
-        res = run([paths.adb, "-s", serial, "shell", f"pm grant {pkg} {p}"], timeout=20)
-        if res["ok"]:
-            granted.append(p)
-    return {"ok": True, "package": pkg, "granted": granted,
-            "count": len(granted), "probe": r["ok"]}
+    listed = run([paths.adb, "-s", serial, "shell",
+                  f"dumpsys package {pkg} | grep -o 'android.permission.[A-Z_.]*' "
+                  f"| sort -u"], timeout=40)
+    wanted = [p for p in dict.fromkeys(listed["out"].split())
+              if p.startswith("android.permission.")]
+    if not wanted:
+        return {"ok": False, "package": pkg, "granted": [], "count": 0,
+                "err": "no runtime permissions found (is the package installed?)"}
+    # Grant, then echo back only the ones that actually stuck.
+    script = ("for p in " + " ".join(wanted) + "; do "
+              f'pm grant {pkg} "$p" >/dev/null 2>&1 && echo "$p"; done')
+    r = run([paths.adb, "-s", serial, "shell", script], timeout=90)
+    granted = [line.strip() for line in r["out"].splitlines()
+               if line.strip().startswith("android.permission.")]
+    return {"ok": bool(granted), "package": pkg, "granted": granted,
+            "count": len(granted), "requested": len(wanted),
+            "note": f"{len(granted)}/{len(wanted)} permissions granted"}
 
 
 # --------------------------------------------------------------------------
 # Logcat
 # --------------------------------------------------------------------------
-LOGCAT_LEVELS = ("V", "D", "I", "W", "E", "F", "S")
-
-
 def logcat(paths: ToolPaths, serial: str, lines: int = 200,
            spec: str = "", since: str = "") -> dict:
     """Snapshot logcat. `spec` is a raw filter spec like 'ActivityManager:I *:S'."""
@@ -314,9 +341,6 @@ def logcat_clear(paths: ToolPaths, serial: str) -> dict:
 # feature silently does nothing, so it is detected explicitly.
 _CLIP_UNSUPPORTED = ("no shell command implementation", "unknown command",
                      "no such service", "not found")
-_clip_support: dict[str, bool] = {}
-
-
 def _clipboard_ok(r: dict) -> bool:
     blob = ((r.get("out") or "") + (r.get("err") or "")).lower()
     return r.get("ok", False) and not any(s in blob for s in _CLIP_UNSUPPORTED)
@@ -327,12 +351,10 @@ def clipboard_get(paths: ToolPaths, serial: str) -> dict:
         return e
     r = _sh(paths, serial, "cmd clipboard get", timeout=20)
     if not _clipboard_ok(r):
-        _clip_support[serial] = False
         blob = (r.get("out") or r.get("err") or "").strip()
         return {"ok": False, "text": "", "supported": False,
                 "err": f"clipboard console unavailable on this image ({blob[:80] or 'no shell command'}). "
                        "Use 'Send' — it types into the focused field via `input text`."}
-    _clip_support[serial] = True
     text = r["out"]
     if text in ("", "null", "NULL"):
         return {"ok": True, "text": "", "supported": True, "note": "clipboard is empty"}
@@ -354,14 +376,14 @@ def clipboard_set(paths: ToolPaths, serial: str, text: str) -> dict:
     text = str(text)
     if len(text) > 100_000:
         return {"ok": False, "err": "clipboard payload too large (100 KB cap)"}
+    if safe.has_text_control(text):
+        return {"ok": False, "err": "clipboard text contains control characters"}
     r = _sh(paths, serial, f'cmd clipboard set "{_dq(text)}"', timeout=25)
     if not _clipboard_ok(r):
-        _clip_support[serial] = False
         blob = (r.get("out") or r.get("err") or "").strip()
         return {"ok": False, "supported": False,
                 "err": f"clipboard console unavailable on this image ({blob[:80] or 'no shell command'}). "
                        "Use 'Send' — it types into the focused field via `input text`."}
-    _clip_support[serial] = True
     return {"ok": True, "chars": len(text), "supported": True}
 
 
@@ -371,7 +393,16 @@ def clipboard_set(paths: ToolPaths, serial: str, text: str) -> dict:
 REC_DIR = Path.home() / "NovaDroid-Shared" / "Recordings"
 _REMOTE = "/sdcard/novadroid-record.mp4"
 _REC_JOBS: dict[str, dict] = {}
+_REC_JOBS_LOCK = threading.RLock()
 MAX_RECORD_S = 180  # screenrecord hard limit
+
+
+def _rec_set_state(job: dict, state: str, err: str = "") -> None:
+    """Always transition through a terminal state, even on a worker crash."""
+    with _REC_JOBS_LOCK:
+        job["state"] = state
+        job["err"] = err
+        job["done"] = time.time()
 
 
 def record_start(paths: ToolPaths, serial: str, seconds: int = 30,
@@ -381,80 +412,128 @@ def record_start(paths: ToolPaths, serial: str, seconds: int = 30,
     screenrecord exits on its own at --time-limit; we keep the Popen so the
     user can stop early (SIGINT makes it finalise the mp4 cleanly, whereas
     SIGKILL leaves a corrupt file).
+
+    v5: every `_REC_JOBS` access is locked, the job is marked "recording"
+    BEFORE the worker thread starts (previously the worker could finish first
+    and then be overwritten back to "recording" forever), and the worker has
+    a `finally` so a crash can never leave `record_stop` waiting 20 s for a
+    terminal state that never arrives.
     """
     if (e := _check(paths, serial)):
         return e
-    if _REC_JOBS.get(serial, {}).get("proc") and _REC_JOBS[serial]["proc"].poll() is None:
-        return {"ok": False, "err": f"already recording on {serial}"}
-    secs = max(1, min(int(seconds or 30), MAX_RECORD_S))
-    mbps = max(1, min(int(bitrate_mbps or 8), 50))
-    REC_DIR.mkdir(parents=True, exist_ok=True)
+    with _REC_JOBS_LOCK:
+        old = _REC_JOBS.get(serial)
+        if old and old.get("proc") and old["proc"].poll() is None:
+            return {"ok": False, "err": f"already recording on {serial}"}
+    try:
+        secs = max(1, min(int(seconds or 30), MAX_RECORD_S))
+        mbps = max(1, min(int(bitrate_mbps or 8), 50))
+    except (TypeError, ValueError):
+        return {"ok": False, "err": "recording duration/bitrate must be numbers"}
+    try:
+        REC_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return {"ok": False, "err": "could not create the Recordings folder"}
     script = (f"screenrecord --time-limit {secs} --bit-rate {mbps * 1000000} "
               f"--verbose {_REMOTE}")
     try:
         proc = subprocess.Popen(
             [paths.adb, "-s", serial, "shell", script],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as ex:
-        return {"ok": False, "err": str(ex)}
+    except OSError:
+        # Never echo str(ex): it can contain a full local executable path.
+        return {"ok": False, "err": "could not start screenrecord (adb launch failed)"}
     job = {"proc": proc, "t0": time.time(), "seconds": secs, "serial": serial,
-           "file": None, "stopping": False}
-    _REC_JOBS[serial] = job
+           "file": None, "stopping": False, "state": "recording", "err": ""}
 
     def _finish():
         try:
-            proc.wait(timeout=secs + 30)
-        except Exception:
-            proc.kill()
-        run([paths.adb, "-s", serial, "shell", "sync"], timeout=20)
-        local = REC_DIR / f"{serial}-{time.strftime('%Y%m%d-%H%M%S')}.mp4"
-        r = run([paths.adb, "-s", serial, "pull", _REMOTE, str(local)], timeout=180)
-        job["file"] = str(local) if r["ok"] and local.exists() else None
-        job["done"] = time.time()
-        job["state"] = "done" if job["file"] else "failed"
-        job["err"] = "" if job["file"] else (r["err"] or r["out"])[-300:]
-        run([paths.adb, "-s", serial, "shell", f"rm -f {_REMOTE}"], timeout=20)
+            try:
+                proc.wait(timeout=secs + 30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
+            run([paths.adb, "-s", serial, "shell", "sync"], timeout=20)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            local = REC_DIR / f"{serial}-{stamp}.mp4"
+            r = run([paths.adb, "-s", serial, "pull", _REMOTE, str(local)],
+                    timeout=180)
+            job["file"] = str(local) if r["ok"] and local.exists() else None
+            _rec_set_state(job, "done" if job["file"] else "failed",
+                           "" if job["file"] else "could not pull the recording")
+        except Exception as ex:
+            # Log for the operator, return a generic message to the client.
+            print(f"[record] worker failed ({type(ex).__name__}): {ex}")
+            _rec_set_state(job, "failed", "recording transfer failed")
+        finally:
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+            try:
+                run([paths.adb, "-s", serial, "shell", f"rm -f {_REMOTE}"],
+                    timeout=20)
+            except Exception:
+                pass
 
-    threading.Thread(target=_finish, daemon=True).start()
-    job["state"] = "recording"
+    with _REC_JOBS_LOCK:
+        _REC_JOBS[serial] = job
+    threading.Thread(target=_finish, daemon=True,
+                     name=f"nova-record-{serial}").start()
     return {"ok": True, "state": "recording", "seconds": secs,
-            "dir": str(REC_DIR), "note": f"recording up to {secs}s — Stop early to save now."}
+            "note": f"recording up to {secs}s — Stop early to save now."}
 
 
 def record_stop(paths: ToolPaths, serial: str) -> dict:
-    job = _REC_JOBS.get(serial)
+    with _REC_JOBS_LOCK:
+        job = _REC_JOBS.get(serial)
     if not job:
         return {"ok": False, "err": f"no recording running on {serial}"}
     proc = job.get("proc")
     if proc and proc.poll() is None:
         # SIGINT finalises the mp4; a hard kill produces an unplayable file.
-        run([paths.adb, "-s", serial, "shell", "pkill -INT screenrecord"], timeout=20)
+        # `pkill` is not on every image (older toybox), so fall back to
+        # pidof + kill rather than silently leaving the recording running.
+        r = run([paths.adb, "-s", serial, "shell", "pkill -INT screenrecord"],
+                timeout=20)
+        if not r["ok"]:
+            run([paths.adb, "-s", serial, "shell",
+                 "kill -INT $(pidof screenrecord) 2>/dev/null"], timeout=20)
         try:
             proc.wait(timeout=25)
-        except Exception:
+        except subprocess.TimeoutExpired:
             if proc.poll() is None:
                 proc.terminate()
     for _ in range(40):   # wait for the pull thread to land the file
-        if job.get("state") in ("done", "failed"):
-            break
+        with _REC_JOBS_LOCK:
+            state = job.get("state")
+            if state in ("done", "failed"):
+                break
         time.sleep(0.5)
-    return {"ok": job.get("state") == "done", "state": job.get("state", "stopping"),
-            "file": job.get("file"), "err": job.get("err", "")}
+    with _REC_JOBS_LOCK:
+        return {"ok": job.get("state") == "done",
+                "state": job.get("state", "stopping"),
+                "file": job.get("file"), "err": job.get("err", "")}
 
 
 def record_state(serial: str) -> dict:
-    job = _REC_JOBS.get(serial)
-    if not job:
-        return {"ok": True, "state": "idle"}
-    proc = job.get("proc")
-    elapsed = round(time.time() - job["t0"], 1)
-    running = bool(proc and proc.poll() is None)
-    return {"ok": True,
-            "state": job.get("state", "recording"),
-            "running": running,
+    with _REC_JOBS_LOCK:
+        job = _REC_JOBS.get(serial)
+        if not job:
+            return {"ok": True, "state": "idle"}
+        # Snapshot under the lock: the worker mutates this dict concurrently.
+        proc = job.get("proc")
+        state = job.get("state", "recording")
+        err = job.get("err", "")
+        file = job.get("file")
+        t0, secs = job["t0"], job["seconds"]
+    elapsed = round(time.time() - t0, 1)
+    running = bool(proc and proc.poll() is None) and state == "recording"
+    return {"ok": True, "state": state, "running": running,
             "elapsed_s": elapsed,
-            "remaining_s": max(0, round(job["seconds"] - elapsed, 1)) if running else 0,
-            "file": job.get("file"), "err": job.get("err", "")}
+            "remaining_s": max(0, round(secs - elapsed, 1)) if running else 0,
+            "file": file, "err": err}
 
 
 # --------------------------------------------------------------------------
@@ -487,7 +566,7 @@ def sensor_set(paths: ToolPaths, serial: str, kind: str, values: list[str]) -> d
     vals = [v for v in (values or []) if str(v).strip() != ""]
     if not vals:
         return {"ok": False, "err": "no values given"}
-    joined = ":".join(str(v)[:24] for v in vals[:3])
+    joined = ":".join(str(v).strip()[:24] for v in vals[:3])
     if _SHELL_DENY.search(joined):
         return {"ok": False, "err": "invalid sensor values"}
     r = run([paths.adb, "-s", serial, "emu", "sensor", "set", kind, joined], timeout=20)
@@ -559,6 +638,11 @@ def send_sms(paths: ToolPaths, serial: str, number: str, text: str = "") -> dict
     body = _safe(text, 300)
     if not num or not re.fullmatch(r"[+0-9\s\-]+", num):
         return {"ok": False, "err": "number may only contain digits, + - and spaces"}
+    # A message the filter refused must be an error, not a silently swapped
+    # "NovaDroid test" the sender never wrote.
+    if text and not body:
+        return {"ok": False,
+                "err": "message contains characters the emulator console refuses"}
     r = run([paths.adb, "-s", serial, "emu", "sms", "send", num,
              body or "NovaDroid test"], timeout=25)
     return {"ok": bool(r["ok"]), "to": num, "log": (r["out"] + r["err"])[-300:]}
@@ -596,3 +680,181 @@ def emu_rotate(paths: ToolPaths, serial: str) -> dict:
         return e
     r = run([paths.adb, "-s", serial, "emu", "rotate"], timeout=20)
     return {"ok": bool(r["ok"]), "log": (r["out"] + r["err"])[-200:]}
+
+
+# --------------------------------------------------------------------------
+# v4.0.0 — deep links, proxy, eco mode, wireless ADB
+# --------------------------------------------------------------------------
+def open_url(paths: ToolPaths, serial: str, url: str) -> dict:
+    """Open a deep link / URL on the device the way a browser link would.
+
+    `am start -a VIEW -d <uri>` resolves through the same intent machinery a
+    tapped link uses, so http(s), app deep links (myapp://...) and Play Store
+    (market://details?id=...) all work.
+    """
+    if (e := _check(paths, serial)):
+        return e
+    url = str(url or "").strip()
+    if safe.has_control(url) or len(url) > 2000:
+        return {"ok": False, "err": "invalid URL"}
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9+.\-]*://\S+", url) and \
+            not url.startswith(("mailto:", "tel:")):
+        return {"ok": False, "err": "give a full URL with a scheme, e.g. "
+                                    "https://… , myapp://screen , market://details?id=…"}
+    # v4 wrapped the URL in single quotes without escaping: a deep link
+    # containing `'` broke out and appended a second `am`/shell command.
+    r = run([paths.adb, "-s", serial, "shell",
+             "am start -a android.intent.action.VIEW -d " + safe.sh_quote(url)],
+            timeout=25)
+    out = r["out"] + r["err"]
+    ok = bool(r["ok"]) and "Error" not in out and "Exception" not in out
+    return {"ok": ok, "url": url, "log": out[-400:]}
+
+
+def set_proxy(paths: ToolPaths, serial: str, host_port: str) -> dict:
+    """Route guest traffic through an HTTP proxy (live, no reboot).
+
+    Writes the global http_proxy setting — the same switch the emulator's own
+    extended-controls Proxy pane uses — and reverses with clear_proxy().
+    """
+    if (e := _check(paths, serial)):
+        return e
+    hp = str(host_port or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9.\-_]+:\d{1,5}", hp):
+        return {"ok": False, "err": "proxy must look like host:port (e.g. 127.0.0.1:8888)"}
+    r = run([paths.adb, "-s", serial, "shell",
+             f"settings put global http_proxy {hp}"], timeout=20)
+    chk = run([paths.adb, "-s", serial, "shell",
+               "settings get global http_proxy"], timeout=15)
+    applied = (chk["out"] or "").strip()
+    return {"ok": bool(r["ok"]) and applied.startswith(hp.split(":")[0]),
+            "proxy": hp, "verified": applied,
+            "note": "Apps that ignore the system proxy (raw sockets) are not affected."}
+
+
+def clear_proxy(paths: ToolPaths, serial: str) -> dict:
+    if (e := _check(paths, serial)):
+        return e
+    r = run([paths.adb, "-s", serial, "shell",
+             "settings put global http_proxy :0"], timeout=20)
+    return {"ok": bool(r["ok"]), "log": (r["out"] + r["err"])[-200:],
+            "note": "proxy cleared"}
+
+
+def eco_mode(paths: ToolPaths, serial: str, on: bool = True) -> dict:
+    """LDPlayer/MuMu-style Eco mode, guest-side: animations off + caches trimmed.
+
+    Animations are the biggest visible cost on an idle/background instance —
+    killing the three animation scales plus trimming file caches typically
+    frees several hundred MB of guest RAM and drops idle CPU noticeably.
+    Turning Eco OFF restores default animation scales.
+    """
+    if (e := _check(paths, serial)):
+        return e
+    scales = "0 0 0" if on else "1 1 1"
+    r = run([paths.adb, "-s", serial, "shell",
+             f"settings put global window_animation_scale {scales.split()[0]}; "
+             f"settings put global transition_animation_scale {scales.split()[1]}; "
+             f"settings put global animator_duration_scale {scales.split()[2]}"],
+            timeout=25)
+    trimmed = 0
+    if on:
+        t = run([paths.adb, "-s", serial, "shell",
+                 "pm trim-caches 999999999 2>/dev/null; echo done"], timeout=40)
+        trimmed = 1 if "done" in t["out"] else 0
+    return {"ok": bool(r["ok"]), "eco": on, "trim_ran": bool(trimmed),
+            "note": ("Animations off, caches trimmed — instance runs lean. "
+                     if on else "Animations restored to default speed.")}
+
+
+def tcpip(paths: ToolPaths, serial: str, port: int = 5555) -> dict:
+    """Switch the device to ADB-over-Wi-Fi (`adb tcpip`).
+
+    After this, `adb connect <device-ip>:5555` works — the emulator's virtual
+    network exposes the guest IP on the host, so the device IP is reported too.
+    """
+    if (e := _check(paths, serial)):
+        return e
+    port = max(1024, min(int(port or 5555), 65535))
+    r = run([paths.adb, "-s", serial, "tcpip", str(port)], timeout=25)
+    ip = run([paths.adb, "-s", serial, "shell",
+              "ip -f inet addr show wlan0 2>/dev/null | grep -o 'inet [0-9.]*'"],
+             timeout=20)
+    device_ip = (ip["out"].split()[1] if len(ip["out"].split()) > 1 else "")
+    return {"ok": bool(r["ok"]), "port": port, "device_ip": device_ip,
+            "log": (r["out"] + r["err"])[-300:],
+            "note": (f"reconnect later with: adb connect {device_ip}:{port}"
+                     if device_ip else "TCP mode on; find the guest IP with 'ip addr'.")}
+
+
+# --------------------------------------------------------------------------
+# v5.1 — Smart App Archive (BlueStacks 16 parity): remove the APK, keep data
+# --------------------------------------------------------------------------
+ARCHIVE_DIR = Path.home() / "NovaDroid-Shared" / "Archived"
+
+
+def archive_app(paths: ToolPaths, serial: str, package: str) -> dict:
+    """Smart App Archive: pull the base APK to the host, then remove the
+    INSTALLATION while keeping app data (`pm uninstall -k --user 0`).
+
+    BlueStacks 16's headline disk feature (Oct 2026) is plain adb: the APK
+    bytes leave the guest, data stays, and reinstalling the archived APK
+    brings the app back with its state intact — a farm instance can shed
+    gigabytes of games it only plays on weekends.
+    """
+    if (e := _check(paths, serial)):
+        return e
+    if not safe.valid_package(package):
+        return {"ok": False, "err": "invalid package name"}
+    r = run([paths.adb, "-s", serial, "shell", "pm", "path", package], timeout=20)
+    apk_lines = [l.split(":", 1)[1] for l in r["out"].splitlines()
+                 if l.startswith("package:")]
+    if not r["ok"] or not apk_lines:
+        return {"ok": False,
+                "err": f"package not found on {serial}: {package}"}
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    dest = ARCHIVE_DIR / f"{package}.apk"
+    p = run([paths.adb, "-s", serial, "pull", apk_lines[0], str(dest)],
+            timeout=300)
+    if not p["ok"]:
+        return {"ok": False, "err": "could not pull the base APK before "
+                                    "archiving — nothing was changed"}
+    u = run([paths.adb, "-s", serial, "shell", "pm", "uninstall", "-k",
+             "--user", "0", package], timeout=30)
+    out = u["out"] + u["err"]
+    if not u["ok"] or "Success" not in out:
+        return {"ok": False, "archive": str(dest),
+                "err": f"APK saved but uninstall failed: {out.strip()[-200:]}"}
+    return {"ok": True, "package": package, "archived_to": str(dest),
+            "bytes": dest.stat().st_size if dest.exists() else 0,
+            "note": ("APK removed, app DATA kept on the device. Restore it "
+                     "from the Archived list — the app returns with its "
+                     "state intact.")}
+
+
+def archived() -> dict:
+    """List smart-archived APKs on the host."""
+    items = []
+    try:
+        for f in sorted(ARCHIVE_DIR.glob("*.apk")):
+            try:
+                items.append({"package": f.stem, "bytes": f.stat().st_size,
+                              "file": str(f)})
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return {"ok": True, "archived": items, "dir": str(ARCHIVE_DIR)}
+
+
+def restore_app(paths: ToolPaths, serial: str, package: str) -> dict:
+    """Reinstall a smart-archived APK; kept data is picked up automatically."""
+    if (e := _check(paths, serial)):
+        return e
+    if not safe.valid_package(package):
+        return {"ok": False, "err": "invalid package name"}
+    apk = ARCHIVE_DIR / f"{package}.apk"
+    if not apk.is_file():
+        return {"ok": False, "err": f"no archived APK for {package}"}
+    from . import adb as ADB
+    return ADB.install_apk(paths, serial, str(apk))

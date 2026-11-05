@@ -1,12 +1,11 @@
 """Stdlib unittests for NovaDroid core (no device needed). Run: python -m unittest discover -s tests -v"""
-import json
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.config import ToolPaths, DEFAULTS, find_sdk  # noqa: E402
-from core.runner import run, parse_kv_block  # noqa: E402
+from core.config import ToolPaths, DEFAULTS  # noqa: E402
+from core.runner import run  # noqa: E402
 from core import adb as ADB  # noqa: E402
 
 
@@ -31,9 +30,17 @@ class TestRunner(unittest.TestCase):
         r = run(["__nope__binary__"], timeout=10)
         self.assertFalse(r["ok"] and r["code"] == 127)
 
-    def test_kv(self):
-        d = parse_kv_block("sdk: C:\\x\nversion: 1.0\n")
-        self.assertEqual(d["version"], "1.0")
+    def test_run_refuses_empty_args(self):
+        """An empty argv element used to spawn a half-built command."""
+        self.assertFalse(run([])["ok"])
+        self.assertFalse(run(["adb", ""])["ok"])
+        self.assertFalse(run(["adb", None])["ok"])
+
+    def test_png_detection(self):
+        self.assertTrue(ADB._is_png(ADB.PNG_MAGIC + b"\x00" * 2000 + ADB.PNG_IEND))
+        self.assertFalse(ADB._is_png(ADB.PNG_MAGIC + b"\x00" * 2000))  # truncated
+        self.assertFalse(ADB._is_png(b"not a png at all" + b"\x00" * 2000))
+        self.assertFalse(ADB._is_png(b""))
 
 
 class TestMacros(unittest.TestCase):

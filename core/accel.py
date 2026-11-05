@@ -5,13 +5,41 @@ is the mandatory path. `emulator-check accel` returns 0 when ready.
 """
 from __future__ import annotations
 
+import os
+import platform
+
 from .config import ToolPaths
 from .runner import run
+
+
+def _woa_reason() -> str:
+    """Non-empty verdict when this is a Windows-on-ARM host.
+
+    There is no Google emulator Windows-ARM64 build, and Prism (the x86
+    emulation layer) cannot provide nested virtualization — so WHPX setup
+    guidance on a Snapdragon X PC would send the operator in circles.
+    """
+    if platform.system() != "Windows":
+        return ""
+    machine = (platform.machine() or "").upper()
+    if machine == "ARM64" or os.environ.get("PROCESSOR_ARCHITEW6432", "").upper() == "ARM64":
+        return ("Windows on ARM: the Google Android Emulator has no ARM64 "
+                "Windows build, and Prism provides no nested virtualization, "
+                "so WHPX cannot accelerate it here. Use an x86_64 PC, or an "
+                "ARM-native third-party emulator (e.g. BlueStacks ARM beta).")
+    return ""
 
 
 def accel_status(paths: ToolPaths) -> dict:
     info: dict = {"accel": "unknown", "ready": False,
                   "detail": "", "whpx_usable": False, "sunset_note": ""}
+    woa = _woa_reason()
+    if woa:
+        # Hard, honest verdict — probing further would only mislead.
+        info.update(accel="unsupported", detail=woa, whpx_usable=False,
+                    sunset_note=("AEHD sunsets Dec 31 2026 — WHPX is the only "
+                                 "path, and it cannot work on ARM64 Windows."))
+        return info
     if paths.emulator_check:
         r = run([paths.emulator_check, "accel"], timeout=30)
         text = (r["out"] + "\n" + r["err"]).strip()

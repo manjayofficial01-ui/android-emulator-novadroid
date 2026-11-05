@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>NovaDroid — Android Emulator for Windows</title>
-<link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="/styles.css?v=510">
 </head>
 <body>
 <header class="topbar">
@@ -14,8 +14,28 @@
     <select id="device" class="devsel" title="Active device — every panel below targets it"></select>
     <span id="health" class="pill">● connecting…</span>
     <button id="btn-refresh" class="btn small">↻ Refresh all</button>
+    <button id="btn-theme" class="btn small icon" title="Toggle light / dark theme">☀</button>
   </div>
 </header>
+
+<nav class="tabbar" id="tabbar">
+  <button class="tab active" data-tab="system">🖥 System</button>
+  <button class="tab" data-tab="display">📺 Display</button>
+  <button class="tab" data-tab="apps">📦 Apps</button>
+  <button class="tab" data-tab="sim">🛰 Simulation</button>
+  <button class="tab" data-tab="ai">🧠 AI</button>
+  <button class="tab" data-tab="files">📁 Files</button>
+  <button class="tab" data-tab="auto">🤖 Automation</button>
+  <button class="tab" data-tab="tools">🧰 Tools</button>
+</nav>
+
+<div class="nd-ribbon" id="nd-ribbon" role="status" aria-live="polite" aria-label="Agent status">
+  <span class="nd-ribbon-label">Status</span>
+  <span class="pill nd-pill" id="nd-conn">● connecting…</span>
+  <span class="pill nd-pill" id="nd-ver">agent v—</span>
+  <span class="pill nd-pill" id="nd-auth">auth —</span>
+  <span class="pill nd-pill" id="nd-channel">engine —</span>
+</div>
 
 <div id="accel-banner" class="banner hidden"></div>
 
@@ -24,6 +44,7 @@
   <input id="cfg-api" placeholder="same origin (local) or https://&lt;tunnel&gt;.trycloudflare.com">
   <input id="cfg-tok" type="password" placeholder="token (required for remote)">
   <button id="btn-conn" class="btn small primary">Connect</button>
+  <span id="conn-secure" class="nd-secure" title="Security mode">○ local</span>
   <span id="conn-state" class="mono">local mode</span>
 </div>
 
@@ -48,6 +69,10 @@
       <input id="raw-flags" placeholder="-gpu host -cores 4 -memory 4096">
       <button id="btn-raw" class="btn">▶ Raw boot</button>
     </div>
+    <div class="row">
+      <label class="chk" title="Intel hybrid CPUs (12th–14th Gen / Core Ultra): headless instances on engines older than 37.3.6 get throttled onto E-cores. Pinning qemu to the P-cores restores full speed."><input type="checkbox" id="raw-affinity"> 🧵 Pin to P-cores (hybrid CPU)</label>
+      <span id="hybrid-info" class="mono"></span>
+    </div>
     <p class="hint">GPU: <code>host</code> · <code>swiftshader_indirect</code> · <code>lavapipe</code> · <code>angle</code> &nbsp;|&nbsp; Try <code>-feature VulkanNativeSwapchain</code> on XR/new images. Snapshots break under Vulkan — add <code>-no-snapshot</code> then.</p>
   </section>
 
@@ -58,6 +83,8 @@
       <div class="row">
         <button id="btn-shot" class="btn">📷 Screenshot</button>
         <button id="btn-live" class="btn toggle">▶ Live</button>
+        <button id="btn-stream" class="btn toggle" title="MJPEG stream: one connection, continuous frames (much smoother than polling)">⚡ Stream</button>
+        <button id="btn-scrcpy" class="btn small" title="Hardware-decoded mirror window (scrcpy 5.x, D3D11VA) — ~10x lower CPU than software decode. Needs scrcpy installed.">🪞 scrcpy</button>
         <select id="live-fps" title="Live refresh target">
           <option value="500">0.5s</option>
           <option value="1000">1s</option>
@@ -77,12 +104,14 @@
         <button class="btn small navkey" data-key="26">⏻ Power</button>
         <button id="btn-rotate" class="btn small" title="Rotate via emulator console">⟳ Rotate</button>
         <button id="btn-uia" class="btn small">⧉ Layout</button>
+        <button id="btn-shot-save" class="btn small" title="Download the current frame as a PNG">💾 Save frame</button>
+        <label class="chk" title="Keyboard-control layer: mapped keys fire while the dashboard has focus"><input type="checkbox" id="keymap-on"> ⌨ Keys</label>
       </div>
       <div class="row">
         <input id="type-text" placeholder="Type into the device…">
         <button id="btn-type" class="btn small">⌨ Send</button>
       </div>
-      <pre id="input-log" class="mono short"></pre>
+      <pre id="input-log" class="mono short" data-ph="(input / action log)"></pre>
       <pre id="layout" class="mono hidden"></pre>
     </div>
     <h3>Running devices</h3>
@@ -92,10 +121,13 @@
   <!-- ========================= RIGHT: ops =============================== -->
   <section class="card">
     <h2>App &amp; World Ops</h2>
-    <label>APK install (drag-drop path or browse)</label>
+    <label>APK install (drag-drop an .apk anywhere, path or browse)</label>
     <div class="row">
       <input id="apk" placeholder="C:\path\to\app.apk">
       <button id="btn-apk" class="btn primary">⬆ Install</button>
+    </div>
+    <div class="row">
+      <button id="btn-apk-all" class="btn small" title="Install the APK above on EVERY online emulator, in parallel">📦 Install on all instances</button>
     </div>
     <div class="row two">
       <div>
@@ -124,14 +156,14 @@
     </div>
     <label>ADB shell (guarded)</label>
     <div class="row"><input id="shell" placeholder="getprop ro.build.version.release"><button id="btn-shell" class="btn">❯ Run</button></div>
-    <pre id="shell-out" class="mono"></pre>
+    <pre id="shell-out" class="mono" data-ph="(shell output appears here)"></pre>
     <label>Guest performance</label>
     <div class="row"><button id="btn-perf" class="btn">⚡ Sample</button><span id="perf" class="mono"></span></div>
-    <pre id="perf-out" class="mono"></pre>
+    <pre id="perf-out" class="mono" data-ph="(guest load / memory / top output appears here)"></pre>
   </section>
 
   <!-- ========================= SYSTEM HEALTH ============================ -->
-  <section class="card wide">
+  <section class="card wide" data-tab="system">
     <h2>System health <span class="sub">host PC + guest — the two machines that decide smoothness</span></h2>
     <div class="row two">
       <div>
@@ -147,21 +179,61 @@
         <pre id="host-out" class="mono short"></pre>
       </div>
       <div>
-        <label>Guest <span id="guest-head" class="mono"></span></label>
+        <label>Guest</label>
         <div class="bars">
           <div class="bar-row"><span class="bar-label">RAM</span>
             <div class="bar"><div id="bar-gmem" class="fill ram"></div></div><span id="val-gmem" class="bar-val">–</span></div>
           <div class="bar-row"><span class="bar-label">Load</span>
             <div class="bar"><div id="bar-load" class="fill cpu"></div></div><span id="val-load" class="bar-val">–</span></div>
         </div>
-        <pre id="guest-out" class="mono short"></pre>
+      </div>
+    </div>
+</section>
+
+<!-- ==================== ENGINE & COMPATIBILITY (v5.0.0) =============== -->
+<section class="card wide" data-tab="system">
+  <h2>Engine &amp; compatibility <span class="sub">emulator build · WHPX acceleration · AEHD sunset · per-AVD readiness</span></h2>
+  <div class="row">
+    <button id="btn-engine" class="btn primary">⚙ Run engine check</button>
+    <span id="engine-updated" class="hint"></span>
+  </div>
+  <div id="engine-out" class="nd-engine-out">
+    <div class="nd-empty">Press Run engine check to inspect the installed emulator build, host acceleration and per-AVD compatibility.</div>
+  </div>
+</section>
+
+<!-- ==================== SMOOTHNESS ENGINE (v3.0.0) ==================== -->
+<section class="card wide" data-tab="system">
+  <h2>Smoothness engine <span class="sub">real frame stats · bottleneck detection · one-click auto-tune</span></h2>
+    <div class="row two">
+      <div>
+        <div class="score-wrap">
+          <div id="smooth-score" class="score">–</div>
+          <div class="score-meta">
+            <div id="smooth-verdict" class="score-verdict">not measured</div>
+            <div id="smooth-renderer" class="mono inline">renderer: ?</div>
+          </div>
+        </div>
+        <div class="row">
+          <button id="btn-smooth" class="btn primary">⚡ Diagnose</button>
+          <button id="btn-tune" class="btn" title="Show what would change (safe)">🛠 Check tune</button>
+          <button id="btn-tune-apply" class="btn" title="Write the recommended config.ini (stop the AVD first)">💾 Apply tune</button>
+          <button id="btn-smooth-flags" class="btn small" title="Copy suggested smoothness launch flags into Advanced launch">⚑ Suggest raw flags</button>
+          <label class="chk"><input type="checkbox" id="smooth-auto" > auto every 10s</label>
+        </div>
+        <pre id="smooth-out" class="mono short">Press Diagnose while an app is on screen — jank, p95 frame time and the live render path are measured together.</pre>
+        <div id="smooth-hist" class="spark" title="recent smoothness samples"></div>
+      </div>
+      <div>
+        <label>Bottlenecks <span class="hint">(ranked — fix the top one first)</span></label>
+        <div id="bottlenecks" class="list"><div class="mono">—</div></div>
       </div>
     </div>
   </section>
 
   <!-- ========================= TABLET & DISPLAY ========================= -->
-  <section class="card wide">
-    <h2>Tablet &amp; Display <span class="sub">live resize via wm · no reboot · Pixel Tablet frame pre-installed</span></h2>
+  <section class="card wide" data-tab="display">
+    <h2>Tablet &amp; Display <span class="sub">live resize via wm · no reboot · high-FPS · Pixel Tablet frame pre-installed</span></h2>
     <div class="row two">
       <div>
         <div class="row"><button id="btn-disp-get" class="btn small">⌖ Read current</button>
@@ -182,16 +254,35 @@
           <button class="btn small ori" data-mode="seascape">🔄 Seascape</button>
           <button class="btn small ori" data-mode="auto">🌀 Auto-rotate</button>
         </div>
+        <label>High-FPS mode <span class="hint">(live — LDPlayer/MuMu-class)</span></label>
+        <div class="row quick">
+          <button class="btn small hz" data-hz="60">60 Hz</button>
+          <button class="btn small hz" data-hz="90">90 Hz</button>
+          <button class="btn small hz" data-hz="120">120 Hz ⚡</button>
+          <button id="btn-hz-save" class="btn small" title="Persist the selected rate into config.ini (stopped AVD)">💾 Save rate</button>
+        </div>
         <label>Device frame (skin — AVD must be stopped)</label>
         <div class="row"><select id="skin"></select><button id="btn-skin" class="btn">🖼 Apply frame</button></div>
         <div id="skins-note" class="mono"></div>
         <p class="hint">Live resize uses <code>wm size/density</code> — instant, ideal for testing tablet layouts on the running <code>medium_tablet</code> AVD. Save-to-AVD writes <code>hw.lcd.*</code> into <code>config.ini</code> for the next boot.</p>
       </div>
     </div>
+    <div class="nd-env">
+      <label for="env-mode">Camera environment <span class="hint">(emulator environment.ini · 36.6.11+)</span></label>
+      <div class="row">
+        <select id="env-mode" title="Scene / camera environment source">
+          <option value="environment">environment</option>
+          <option value="virtual">virtual</option>
+          <option value="none">none</option>
+        </select>
+        <button id="btn-env-apply" class="btn small">✓ Apply</button>
+        <span id="env-state" class="nd-env-state">not loaded</span>
+      </div>
+    </div>
   </section>
 
   <!-- ======================== APPS & LOGCAT ============================= -->
-  <section class="card wide">
+  <section class="card wide" data-tab="apps">
     <h2>Installed apps &amp; logcat <span class="sub">launch, freeze, wipe data, uninstall · live system log</span></h2>
     <div class="row two">
       <div>
@@ -202,6 +293,7 @@
             <option value="0">all</option>
           </select>
           <button id="btn-apps" class="btn small">↻ Load</button>
+          <button id="btn-archived" class="btn small" title="Smart App Archive (BlueStacks 16-class): remove the APK, keep the data — reinstall restores the app with its state">📦 Archived</button>
         </div>
         <div id="apps" class="list tall"></div>
       </div>
@@ -223,7 +315,7 @@
   </section>
 
   <!-- ======================= DEVICE SIMULATION ========================== -->
-  <section class="card wide">
+  <section class="card wide" data-tab="sim">
     <h2>Device simulation <span class="sub">sensors · radio · biometrics · telephony · clipboard · recording</span></h2>
     <div class="row three">
       <div>
@@ -271,8 +363,43 @@
     </div>
   </section>
 
+  <!-- ==================== AI ASSISTANT (v3.0.0) ========================= -->
+  <section class="card wide" data-tab="ai">
+    <h2>AI assistant &amp; on-device AI <span class="sub">natural-language device control · offline · plus honest Gemini Nano / AICore readiness</span></h2>
+    <div class="row two">
+      <div>
+        <label>Command the device in plain English</label>
+        <div class="row">
+          <input id="ai-cmd" placeholder="rotate to landscape · battery 20% charging · launch com.example.app · why is it laggy?">
+          <button id="btn-ai-run" class="btn primary">▶ Run</button>
+        </div>
+        <div class="row quick">
+          <button class="btn small aiq" data-q="why is it laggy?">why laggy?</button>
+          <button class="btn small aiq" data-q="rotate to landscape">landscape</button>
+          <button class="btn small aiq" data-q="battery 20% charging">battery 20%</button>
+          <button class="btn small aiq" data-q="set gps to 27.7172, 85.3240">GPS KTM</button>
+          <button class="btn small aiq" data-q="take a screenshot">screenshot</button>
+          <button class="btn small aiq" data-q="why did it crash">triage crash</button>
+        </div>
+        <pre id="ai-out" class="mono">Runs locally — no API key, no cloud. The parser is deterministic, so it never invents an adb flag.</pre>
+      </div>
+      <div>
+        <div class="row">
+          <button id="btn-ai-status" class="btn">🧠 Check on-device AI</button>
+          <span id="ai-level" class="pill">not checked</span>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button id="btn-agent-skill" class="btn small" title="Download the agent skill file (markdown): point Claude/Codex/your agent at the REST API — the BlueStacks-Desktop pattern, but for the stock Google emulator">🤖 Agent skill file</button>
+          <span class="hint">GET /api/agent-skill</span>
+        </div>
+        <pre id="ai-status-out" class="mono tall">Gemini Nano runs in AICore, a system service that emulator images do not ship.
+This probe tells you which layer is missing instead of letting you guess.</pre>
+      </div>
+    </div>
+  </section>
+
   <!-- ==================== SHARED FOLDER + APK COMPAT ==================== -->
-  <section class="card wide">
+  <section class="card wide" data-tab="files">
     <h2>Shared Folder &amp; APK Compatibility <span class="sub">one folder for PC + emulator · ARM phone APKs OK via translation</span></h2>
     <div class="row two">
       <div>
@@ -288,9 +415,9 @@
           <div><label>📥 Device folder — exact copy FROM device (🗑 delete everywhere)</label><div id="shared-dev" class="list"><div class="mono">—</div></div></div>
         </div>
         <div class="row"><button id="btn-push" class="btn small">⬆ Push Desktop</button>
-        <button id="btn-pull" class="btn small">⬇ Pull device</button></div>
+          <button id="btn-pull" class="btn small">⬇ Pull device</button></div>
         <div class="row"><button id="btn-export-pc" class="btn small primary" title="Copy every staged Desktop file to your real Windows Desktop">🖥 Export PC → Desktop</button>
-        <button id="btn-export-dev" class="btn small primary" title="Pull & copy every device file to your real Windows Desktop">🖥 Export Device → Desktop</button></div>
+          <button id="btn-export-dev" class="btn small primary" title="Pull & copy every device file to your real Windows Desktop">🖥 Export Device → Desktop</button></div>
         <label>Upload file from browser (lands in shared folder)</label>
         <div class="row"><input id="up-file" type="file"><button id="btn-upload" class="btn">⬆ Upload</button></div>
       </div>
@@ -304,32 +431,130 @@
   </section>
 
   <!-- ========================= AUTOMATION =============================== -->
-  <section class="card wide">
-    <h2>Automation <span class="sub">Nox/LDPlayer-class macros + multi-instance synchronizer</span></h2>
+  <section class="card wide" data-tab="auto">
+    <h2>Automation <span class="sub">macros with loops + multi-instance synchronizer + keyboard control</span></h2>
     <div class="row two">
       <div>
         <label>Macro recorder (click steps run on target device)</label>
         <div class="row"><input id="macro-name" placeholder="farm-daily"><button id="btn-macro-save" class="btn">💾 Save</button><button id="btn-macro-run" class="btn primary">▶ Run</button><button id="btn-macro-del" class="btn small danger">🗑</button></div>
         <div class="row"><button class="btn small" data-macro='{"type":"tap","x":540,"y":1600}'>＋Tap</button>
-        <button class="btn small" data-macro='{"type":"swipe","x1":540,"y1":1400,"x2":540,"y2":400,"ms":400}'>＋Swipe↑</button>
-        <button class="btn small" data-macro='{"type":"key","code":3}'>＋Home</button>
-        <button class="btn small" data-macro='{"type":"sleep","s":2}'>＋Wait2s</button>
-        <button id="btn-macro-clear" class="btn small">✕ Clear</button></div>
+          <button class="btn small" data-macro='{"type":"swipe","x1":540,"y1":1400,"x2":540,"y2":400,"ms":400}'>＋Swipe↑</button>
+          <button class="btn small" data-macro='{"type":"key","code":3}'>＋Home</button>
+          <button class="btn small" data-macro='{"type":"sleep","s":2}'>＋Wait2s</button>
+          <button id="btn-macro-clear" class="btn small">✕ Clear</button></div>
+        <div class="row">
+          <label class="chk" title="Repeat the whole macro N times">loops <input id="macro-loops" type="number" value="1" min="1" max="500" style="width:70px"></label>
+          <label class="chk" title="Pause between loops (seconds)">pause <input id="macro-delay" type="number" value="1" min="0" max="300" style="width:70px"></label>
+        </div>
         <pre id="macro-steps" class="mono">[]</pre>
         <div id="macros" class="mono"></div>
       </div>
       <div>
-        <label>Operation synchronizer — mirror one tap to ALL devices (parallel)</label>
-        <div class="row"><input id="sync-x" value="540"><input id="sync-y" value="1200"><button id="btn-sync" class="btn primary">⛓ Sync-tap all</button></div>
+        <label>Operation synchronizer — mirror one action to ALL devices (parallel)</label>
+        <div class="row">
+          <select id="sync-action" title="Which action is mirrored">
+            <option value="tap">tap</option>
+            <option value="swipe">swipe</option>
+            <option value="text">text</option>
+            <option value="key">key</option>
+          </select>
+          <input id="sync-x" value="540" title="tap x / swipe x1">
+          <input id="sync-y" value="1200" title="tap y / swipe y1">
+          <input id="sync-x2" placeholder="x2" title="swipe x2 (swipe only)">
+          <input id="sync-y2" placeholder="y2" title="swipe y2 (swipe only)">
+          <input id="sync-text" placeholder="text / key code" title="text or keycode for text/key actions">
+          <button id="btn-sync" class="btn primary">⛓ Sync all</button>
+        </div>
         <pre id="sync-out" class="mono"></pre>
+        <h3>Keyboard control <span class="sub">map host keys → taps · BlueStacks-class, saved per browser</span></h3>
+        <div class="row">
+          <button id="btn-km-add" class="btn small">＋ Map next key → next screen tap</button>
+          <button id="btn-km-wasd" class="btn small" title="W/A/S/D as screen-quarter swipes">WASD preset</button>
+          <button id="btn-km-clear" class="btn small danger">✕ Clear maps</button>
+        </div>
+        <div id="keymap-list" class="list short-list"></div>
         <h3>System</h3>
         <pre id="info" class="mono"></pre>
       </div>
     </div>
   </section>
+
+  <!-- ==================== AVD TOOLS (v4.0.0) ============================ -->
+  <section class="card wide" data-tab="tools">
+    <h2>AVD tools <span class="sub">disk hygiene · backup/restore · rename · root — the utilities gaming emulators hide</span></h2>
+    <div class="row">
+      <input id="avdtool-name" placeholder="AVD name (e.g. medium_phone)">
+      <button id="btn-disk" class="btn small">💽 Disk usage</button>
+      <button id="btn-cleanup" class="btn small" title="Delete snapshots + cache (userdata kept)">🧹 Reclaim disk</button>
+      <button id="btn-backup" class="btn small">🗄 Backup</button>
+      <button id="btn-rename" class="btn small">✎ Rename…</button>
+    </div>
+    <pre id="disk-out" class="mono">Disk usage shows where the GB actually are: userdata vs quickboot snapshots vs cache.
+Reclaim deletes snapshots + cache only — apps and data survive (next boot is cold).
+Backup zips the whole instance into NovaDroid-Shared\Backups — stop the AVD first.</pre>
+    <div class="row">
+      <input id="restore-zip" placeholder="…\NovaDroid-Shared\Backups\medium_phone-20260101-120000.zip">
+      <input id="restore-name" placeholder="new name (optional)">
+      <button id="btn-restore" class="btn small">⤓ Restore backup</button>
+      <button id="btn-root" class="btn small" title="Toggle adbd root (google_apis images only)">🔧 Root toggle</button>
+    </div>
+  </section>
+
+  <!-- ==================== PORTS + POWER OPS (v4.0.0) ==================== -->
+  <section class="card wide" data-tab="tools">
+    <h2>Ports &amp; power ops <span class="sub">adb forward/reverse · deep links · proxy · eco mode · wireless ADB</span></h2>
+    <div class="row two">
+      <div>
+        <label>Port forwarding (PC ⇄ device)</label>
+        <div class="row">
+          <input id="port-local" type="number" placeholder="local port" style="max-width:120px">
+          <input id="port-remote" type="number" placeholder="remote port" style="max-width:120px">
+          <input id="port-abstract" placeholder="abstract socket (optional, e.g. webview_devtools_remote_1234)">
+          <button id="btn-fwd-add" class="btn small">→ Forward</button>
+          <button id="btn-rev-add" class="btn small" title="Device connects TO this PC (dev servers)">← Reverse</button>
+        </div>
+        <div class="row">
+          <button id="btn-ports-refresh" class="btn small">↻ List rules</button>
+          <button id="btn-ports-clear" class="btn small danger" title="Remove every forward for this device">🗑 Remove all forwards</button>
+        </div>
+        <div id="ports-list" class="list short-list"><div class="mono">—</div></div>
+      </div>
+      <div>
+        <label>Quick ops</label>
+        <div class="row">
+          <input id="url-input" placeholder="https://… or myapp://screen or market://details?id=…">
+          <button id="btn-open-url" class="btn small">🔗 Open on device</button>
+        </div>
+        <div class="row">
+          <input id="proxy-input" placeholder="proxy host:port (e.g. 127.0.0.1:8888)">
+          <button id="btn-proxy" class="btn small">🛡 Set proxy</button>
+          <button id="btn-proxy-clear" class="btn small">✕ Clear</button>
+        </div>
+        <div class="row">
+          <button id="btn-eco-on" class="btn small" title="Animations off + caches trimmed (LDPlayer Eco-class)">🌱 Eco on</button>
+          <button id="btn-eco-off" class="btn small">🌱 Eco off</button>
+          <button id="btn-tcpip" class="btn small" title="ADB over Wi-Fi (adb tcpip 5555)">📡 Wireless ADB</button>
+        </div>
+        <label>GPU preference <span class="hint">(MuMu-class per-instance GPU · next launch · Windows)</span></label>
+        <div class="row">
+          <select id="gpu-mode" title="Which GPU renders the emulator">
+            <option value="">— current —</option>
+            <option value="auto">auto (Windows decides)</option>
+            <option value="power">power saving (iGPU)</option>
+            <option value="performance">high performance (dGPU)</option>
+          </select>
+          <button id="btn-gpu-apply" class="btn small">✓ Apply</button>
+          <span id="gpu-state" class="mono"></span>
+        </div>
+        <p class="hint">Eco mode: animations off + guest caches trimmed — frees RAM and idle CPU for background instances. Wireless ADB reports the guest IP so you can <code>adb connect</code> from anywhere.</p>
+      </div>
+    </div>
+  </section>
 </main>
 
-<footer>Engine: Google Android Emulator (QEMU ranchu · gfxstream · WHPX) · Manager: NovaDroid <span id="agent-v">1.x</span> · No ads · Android 16/17 images · <span id="sdk"></span></footer>
-<script src="/app.js"></script>
+<footer>Engine: Google Android Emulator (QEMU ranchu · gfxstream · WHPX) · Manager: NovaDroid <span id="agent-v">5.1</span> · No ads · Android 16/17 images · <span id="sdk"></span></footer>
+<div id="toast-root" class="toast-root"></div>
+<div id="dropveil" class="dropveil hidden"><div>⬇ Drop APK to install on <b id="drop-target">device</b></div></div>
+<script src="/app.js?v=510"></script>
 </body>
 </html>

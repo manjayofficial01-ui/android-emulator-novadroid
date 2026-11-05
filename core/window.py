@@ -31,6 +31,8 @@ import subprocess
 from ctypes import wintypes
 from pathlib import Path
 
+from . import safe
+
 FALLBACK_SCREEN = (1920, 1080)
 TITLE_MARGIN = 60   # keeps the title bar comfortably grabbable
 
@@ -102,21 +104,27 @@ def max_window_size() -> tuple[int, int]:
 
 
 def user_ini(name: str) -> Path:
-    return Path.home() / ".android" / "avd" / f"{name}.avd" / "emulator-user.ini"
+    """`emulator-user.ini` for `name`. Raises ValueError on a bad AVD name."""
+    from .avd import avd_dir
+    if not safe.valid_avd_name(name):
+        raise ValueError("invalid AVD name")
+    return avd_dir(name) / "emulator-user.ini"
 
 
 def window_state(name: str) -> dict:
-    p = user_ini(name)
-    info: dict = {"avd": name, "ini_exists": p.exists(), "x": None, "y": None}
+    from . import inifile
+    # v4 passed the raw `?name=` into avd_dir(): `../../foo` let a caller read
+    # any `.ini` on the machine. The route is read-only, but that is still an
+    # information disclosure — and fix_window() below could WRITE to it.
+    if not safe.valid_avd_name(name):
+        return {"ok": False, "avd": name,
+                "err": "invalid AVD name (letters, digits, . _ - only)"}
     try:
-        if p.exists():
-            for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-                if line.startswith("window.x"):
-                    info["x"] = line.split("=", 1)[1].strip()
-                elif line.startswith("window.y"):
-                    info["y"] = line.split("=", 1)[1].strip()
-    except OSError as e:
-        info["err"] = str(e)
+        kv = inifile.parse(user_ini(name))
+    except (ValueError, OSError):
+        return {"ok": False, "avd": name, "err": "invalid AVD name"}
+    info: dict = {"ok": True, "avd": name, "ini_exists": bool(kv),
+                  "x": kv.get("window.x"), "y": kv.get("window.y")}
     left, top, right, bottom = work_area()
     info["screen"] = f"{right - left}x{bottom - top}"
     info["work_area"] = f"{left},{top} {right}x{bottom - top}"
@@ -134,16 +142,23 @@ def window_state(name: str) -> dict:
 def reset_saved_position(name: str, x: int | None = None, y: int | None = None) -> dict:
     """Rewrite saved window coords. AVD must be STOPPED for this to stick."""
     from . import inifile
-    avd_dir = Path.home() / ".android" / "avd" / f"{name}.avd"
-    if not avd_dir.exists():
+    from .avd import avd_dir
+    if not safe.valid_avd_name(name):
+        return {"ok": False, "err": "invalid AVD name"}
+    if not avd_dir(name).exists():
         return {"ok": False, "err": f"AVD not found: {name}"}
+    try:
+        x = int(x) if x is not None else None
+        y = int(y) if y is not None else None
+    except (TypeError, ValueError):
+        return {"ok": False, "err": "window coordinates must be numbers"}
     if x is None or y is None:
         cx, cy = center_for()
         x, y = cx if x is None else x, cy if y is None else y
     try:
         inifile.upsert(user_ini(name), {"window.x": str(int(x)), "window.y": str(int(y))})
-    except OSError as e:
-        return {"ok": False, "err": f"could not write emulator-user.ini: {e}"}
+    except (OSError, ValueError):
+        return {"ok": False, "err": "could not write emulator-user.ini"}
     return {"ok": True, "avd": name, "x": int(x), "y": int(y),
             "note": "Takes effect on next boot. Reopen the AVD to verify."}
 
@@ -152,7 +167,12 @@ def reset_saved_position(name: str, x: int | None = None, y: int | None = None) 
 # Also rescales (aspect preserved) when the window cannot fit the work area.
 _MOVE_PS = r"""
 Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f); [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r); public struct RECT { public int L; public int T; public int R; public int B; }' -Name WinMove -Namespace W32;
-$procs = @(Get-Process | Where-Object { ($_.ProcessName -in 'emulator','qemu-system-x86_64','qemu-system-aarch64') -and ($_.MainWindowTitle -cmatch '^Android Emulator - ') });
+# Prefix match, not -in: the real binary is `qemu-system-x86_64-headless`
+# (plus -winsys variants), so an exact allowlist silently found nothing and
+# "Fix window" reported "no running emulator" while the off-screen window was
+# right there. Title matching stays case-SENSITIVE and anchored so IDEs and
+# browsers are never touched.
+$procs = @(Get-Process | Where-Object { (($_.ProcessName -eq 'emulator') -or ($_.ProcessName -like 'qemu-system-*')) -and ($_.MainWindowTitle -cmatch '^Android Emulator - ') });
 if ($procs.Count -eq 0) { Write-Output 'NOEMU'; exit 0 }
 foreach ($e in $procs) {
   $r = New-Object W32.WinMove+RECT; [W32.WinMove]::GetWindowRect($e.MainWindowHandle, [ref]$r) | Out-Null;
@@ -193,12 +213,20 @@ def move_running(x: int | None = None, y: int | None = None,
         return {"ok": bool(lines), "moved": lines[-4:],
                 "note": "Window moved live — no reboot needed."}
     except Exception as e:
-        return {"ok": False, "moved": [], "err": str(e)}
+        print(f"[window] move failed ({type(e).__name__}): {e}")
+        return {"ok": False, "moved": [],
+                "err": f"window move failed ({type(e).__name__})"}
 
 
 def fix_window(name: str) -> dict:
     """One-click fix: live-move (+ refit) if running, and always reset the
     saved position so the next boot lands on screen too."""
+    # v4 reset_saved_position() rejected a bad name but fix_window() still
+    # called move_running(), so a malformed request could nonetheless yank a
+    # live emulator window around. Bail out before touching any window.
+    if not safe.valid_avd_name(name):
+        return {"ok": False, "err": "invalid AVD name (letters, digits, . _ - only)",
+                "saved": None, "live": None, "screen": "", "tip": ""}
     saved = reset_saved_position(name)
     live = move_running()
     left, top, right, bottom = work_area()
