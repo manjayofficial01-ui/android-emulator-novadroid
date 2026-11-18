@@ -13,7 +13,7 @@ operator can hand an agent ONE url + ONE token. Stdlib-only, no state.
 """
 from __future__ import annotations
 
-VERSION_STAMP = "5.1.0"
+VERSION_STAMP = "5.1.2"
 
 _SKILL = """# NovaDroid Agent Skill — drive Android emulators over REST
 

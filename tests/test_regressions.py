@@ -315,6 +315,14 @@ class TestV5AuthRegressions(unittest.TestCase):
                          "Content-Type": "application/json; charset=utf-8"}, body)
         self.assertEqual(self.ND.jread(good), {"a": 1})
         self.assertEqual(good.out, [])
+        # v5.1.2: malformed JSON used to be swallowed as {} — a bad
+        # /api/apk/install body then answered "no device selected" instead of
+        # the parse error. It must fail honestly with 400.
+        bad = _BodyReq({"Content-Length": "11", "Content-Type": "application/json"},
+                       b'{"a": [1, 2')
+        self.assertIsNone(self.ND.jread(bad))
+        self.assertEqual(bad.out[0][0], 400)
+        self.assertIn("invalid JSON", bad.out[0][1]["err"])
 
     def test_shell_and_gui_are_opt_in(self):
         for path, flag, needle in (("/api/shell", "ALLOW_SHELL", "--allow-shell"),

@@ -174,31 +174,6 @@ def list_packages(paths: ToolPaths, serial: str, third_party: bool = True) -> di
             "third_party": third_party}
 
 
-def package_info(paths: ToolPaths, serial: str, package: str) -> dict:
-    if (e := _check(paths, serial)):
-        return e
-    pkg = _pkg(package)
-    if not pkg:
-        return {"ok": False, "err": "invalid package name"}
-    r = run([paths.adb, "-s", serial, "shell",
-             f"dumpsys package {pkg} | head -40"], timeout=40)
-    text = r["out"]
-    info: dict = {"package": pkg, "raw": text[:2500]}
-    m = re.search(r"versionCode=(\d+)", text)
-    if m:
-        info["versionCode"] = int(m.group(1))
-    m = re.search(r"versionName=([^\s]+)", text)
-    if m:
-        info["versionName"] = m.group(1)
-    m = re.search(r"firstInstallTime=(\S+)", text)
-    if m:
-        info["installed"] = m.group(1)
-    m = re.search(r"targetSdk=(\d+)", text)
-    if m:
-        info["targetSdk"] = int(m.group(1))
-    return {"ok": bool(r["ok"]), "info": info}
-
-
 def launch(paths: ToolPaths, serial: str, package: str) -> dict:
     """Open an app the way a launcher icon would.
 

@@ -78,7 +78,7 @@ ALLOW_GUI = False      # --allow-gui: opt-in launching Explorer on the host
 ALLOWED_ORIGINS: frozenset[str] = frozenset()
 ALLOWED_HOSTS: frozenset[str] = frozenset()
 STRICT_HOST = False
-VERSION = "5.1.0"
+VERSION = "5.1.2"
 MAX_BODY = 320 * 1024 * 1024  # browser uploads are base64 -> ~1.37x on the wire
 REQUEST_TIMEOUT = 30          # slowloris guard for request line + body
 
@@ -237,8 +237,14 @@ def jread(handler: SimpleHTTPRequestHandler) -> dict | None:
         return {}
     try:
         parsed = json.loads(raw.decode("utf-8") or "{}")
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return {}
+    except (UnicodeDecodeError, json.JSONDecodeError) as ex:
+        # v5.1.2: this used to silently return {}, so a malformed body reached
+        # routes as an EMPTY request — a bad /api/apk/install body produced a
+        # misleading "no device selected" instead of the real problem.
+        handler._json({"ok": False,
+                       "err": f"invalid JSON body: {ex.__class__.__name__}"},
+                      400)
+        return None
     return parsed if isinstance(parsed, dict) else {}
 
 
@@ -484,9 +490,6 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/apps":
             return self._json(APPS.list_packages(
                 PATHS, q.get("serial", ""), q.get("third_party", "1") != "0"))
-        if path == "/api/apps/info":
-            return self._json(APPS.package_info(PATHS, q.get("serial", ""),
-                                                q.get("package", "")))
         if path == "/api/logcat":
             return self._json(APPS.logcat(PATHS, q.get("serial", ""),
                                           _int(q.get("lines", 200), 200),
@@ -513,8 +516,6 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(DISP.get_display(PATHS, q.get("serial", "")))
         if path == "/api/skins":
             return self._json(DISP.list_skins(PATHS))
-        if path == "/api/avds/window":
-            return self._json(WIN.window_state(q.get("name", "")))
         if path == "/api/avds/environment":
             return self._json(ENVIRON.get(q.get("name", "")))
         # --- AVD toolkit (disk usage) + port forwarding ---
@@ -524,8 +525,6 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(PORTS.forwards(PATHS, q.get("serial", "")))
         if path == "/api/ports/reverse":
             return self._json(PORTS.reverses(PATHS, q.get("serial", "")))
-        if path == "/api/refresh-rates":
-            return self._json({"ok": True, "rates": list(DISP.REFRESH_RATES)})
         if path == "/api/shared":
             return self._json(SHARE.status())
         if path == "/api/shared/device":
@@ -541,8 +540,6 @@ class Handler(SimpleHTTPRequestHandler):
                                             q.get("package", "")))
         if path == "/api/smoothness/history":
             return self._json(PERF.history(_int(q.get("limit", 60), 60)))
-        if path == "/api/smoothness/renderer":
-            return self._json(PERF.renderer(PATHS, q.get("serial", "")))
         if path == "/api/smoothness/flags":
             return self._json(PERF.suggest_flags(PATHS, q.get("serial", "")))
         if path == "/api/tune":
@@ -554,8 +551,6 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(AI.triage(PATHS, q.get("serial", ""),
                                         _int(q.get("lines", 1000), 1000),
                                         q.get("spec", "")))
-        if path == "/api/ai/nnapi":
-            return self._json(AI.nnapi_status(PATHS, q.get("serial", "")))
         # --- v5.1: agent skill file, scrcpy, GPU preference, hybrid CPU ---
         if path == "/api/agent-skill":
             body = AGENTSKILL.skill_text().encode("utf-8")
@@ -897,11 +892,6 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/shared/mirror":
             return self._json(SHARE.mirror(PATHS, b.get("serial", ""),
                                            b.get("direction", "")))
-        if path == "/api/shared/delete-pc":
-            return self._json(SHARE.delete_pc(b.get("files", [])))
-        if path == "/api/shared/delete-device":
-            return self._json(SHARE.delete_device(PATHS, b.get("serial", ""),
-                                                  b.get("files", [])))
         if path == "/api/shared/delete":
             return self._json(SHARE.delete_everywhere(PATHS, b.get("serial", ""),
                                                       b.get("files", [])))
@@ -914,8 +904,6 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/apk/analyze":
             return self._json(COMPAT.check(PATHS, b.get("apk_path", ""),
                                            b.get("serial", "")))
-        if path == "/api/sync-tap":
-            return self._json(sync_tap(b.get("taps", [])))
         # --- fleet batch install + generalised multi-instance sync ---
         if path == "/api/apk/install-all":
             return self._json(ADB.install_apk_all(PATHS, b.get("apk_path", "")))
@@ -978,8 +966,6 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/ai/command":
             return self._json(AI.assist(PATHS, b.get("serial", ""),
                                         b.get("text", "")))
-        if path == "/api/ai/interpret":
-            return self._json(AI.interpret(b.get("text", "")))
         if path == "/api/ai/triage":
             return self._json(AI.triage_logcat(b.get("lines", []) or []))
         # --- v5.1: smart app archive + scrcpy + GPU preference ---
@@ -1089,12 +1075,6 @@ def sync_input(inputs) -> dict:
         results = list(pool.map(_one, items))
     return {"ok": all(r["ok"] for r in results), "action": action,
             "results": results, "count": len(results), "parallel": True}
-
-
-def sync_tap(taps) -> dict:
-    """Back-compat wrapper: the v1 payload shape mapped onto sync_input."""
-    return sync_input([{**(t if isinstance(t, dict) else {}), "action": "tap"}
-                       for t in (taps or [])])
 
 
 def re_serial(value: str) -> bool:

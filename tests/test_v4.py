@@ -519,15 +519,6 @@ class TestSyncInputShape(unittest.TestCase):
         self.assertEqual(sorted(taps_seen),
                          [("emulator-5554", "hi"), ("emulator-5556", "hi")])
 
-    def test_sync_tap_backcompat(self):
-        import novadroid as ND
-        with mock.patch.object(ND, "PATHS", FAKE):
-            with mock.patch.object(ND.ADB, "tap", return_value={"ok": True}) as mt:
-                r = ND.sync_tap([{"serial": "emulator-5554", "x": 1, "y": 2}])
-        self.assertTrue(r["ok"])
-        self.assertEqual(r["action"], "tap")
-        mt.assert_called_once()
-
 
 if __name__ == "__main__":
     unittest.main()

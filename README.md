@@ -1,5 +1,13 @@
 # ◈ NovaDroid — Best Android Emulator Manager for Windows
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Tests](https://img.shields.io/badge/unittests-315%20passing-brightgreen)
+
+<div align="center">
+  <img src="docs/screenshot-dashboard.png" alt="NovaDroid dashboard — Pixel Tablet AVD running under WHPX" width="860">
+  <p><sub>NovaDroid 5.1.2 — Pixel Tablet AVD live on WHPX: fleet controls, live view, one-click APK install / launch / uninstall.</sub></p>
+</div>
+
 **Live dashboard:** https://novadroid-rho.vercel.app (static UI on Vercel —
 paste your tunnel URL + token in its 🔌 Backend bar; full runbook in `DEPLOY.md`)
 
@@ -101,20 +109,19 @@ novadroid/
 `/api/health` · `/api/info` · `/api/avds` · `/api/profiles` · `/api/devices` ·
 `/api/jobs` · `/api/screen?serial=` · `/api/screen/stream?serial=` ·
 `/api/layout?serial=` · `/api/perf?serial=` ·
-`/api/host` · `/api/boot?serial=` · `/api/macros` · `/api/apps` · `/api/apps/info` ·
+`/api/host` · `/api/boot?serial=` · `/api/macros` · `/api/apps` ·
 `/api/logcat?serial=` · `/api/clipboard?serial=` · `/api/record` · `/api/record/download` ·
 `/api/sensors?serial=` · `/api/network?serial=` · `/api/snapshots?serial=` ·
-`/api/display/presets` · `/api/display?serial=` · `/api/skins` · `/api/avds/window?name=` ·
+`/api/display/presets` · `/api/display?serial=` · `/api/skins` ·
 `/api/shared` · `/api/shared/device`
 
 *Smoothness + AI (v3):*
 `/api/smoothness?serial=` · `/api/smoothness/diagnose?serial=` ·
-`/api/smoothness/history?limit=` · `/api/smoothness/renderer?serial=` ·
-`/api/tune?name=` · `/api/ai?serial=` · `/api/ai/triage?serial=` · `/api/ai/nnapi?serial=`
+`/api/smoothness/history?limit=` ·
+`/api/tune?name=` · `/api/ai?serial=` · `/api/ai/triage?serial=`
 
 *v4 (AVD toolkit · ports · power ops):*
-`/api/avds/disk?name=` · `/api/ports?serial=` · `/api/ports/reverse?serial=` ·
-`/api/refresh-rates`
+`/api/avds/disk?name=` · `/api/ports?serial=` · `/api/ports/reverse?serial=`
 
 *v5.1 (agent skill · scrcpy · GPU · hybrid CPU · smart archive):*
 `/api/agent-skill` (markdown) · `/api/scrcpy` · `/api/gpu` · `/api/cpu` ·
@@ -131,11 +138,11 @@ novadroid/
 `/api/call` · `/api/signal` · `/api/power` · `/api/rotate` · `/api/display/apply` ·
 `/api/display/reset` · `/api/display/orientation` · `/api/display/save` · `/api/avds/skin` ·
 `/api/avds/window/fix` · `/api/shared/upload` · `/api/shared/push` · `/api/shared/pull` ·
-`/api/shared/autosync` · `/api/shared/sync` · `/api/shared/mirror` · `/api/shared/delete-pc` ·
-`/api/shared/delete-device` · `/api/shared/delete` · `/api/shared/reveal` · `/api/shared/export` · `/api/sync-tap`
+`/api/shared/autosync` · `/api/shared/sync` · `/api/shared/mirror` ·
+`/api/shared/delete` · `/api/shared/reveal` · `/api/shared/export`
 
 *Smoothness + AI (v3):*
-`/api/input/long-press` · `/api/tune/apply` · `/api/ai/command` · `/api/ai/interpret` · `/api/ai/triage`
+`/api/input/long-press` · `/api/tune/apply` · `/api/ai/command` · `/api/ai/triage`
 
 *v4 (AVD toolkit · ports · power ops):*
 `/api/avds/cleanup` · `/api/avds/backup` · `/api/avds/restore` · `/api/avds/rename` ·
@@ -160,7 +167,67 @@ accepts `affinity` (P-core mask)
 **DELETE**
 `/api/avds?name=` · `/api/macros?name=`
 
-## v5.1.0 — the Nov 2026 audit + competitive refresh (current)
+## v5.1.2 — the APK flow repair (current)
+
+Reproduced live and fixed: **no AVD ever came online, so nothing could be
+installed, launched or uninstalled.** Root cause chain:
+
+- **Corrupt quickboot snapshot.** A crash mid-save left
+  `snapshots/default_boot/ram.bin` truncated (329 bytes instead of ~4 GB);
+  restoring it fails with `Error -1 from the snapshot callback` and, through
+  `android emulator start`, looked like an eternal "waiting for the virtual
+  device to fully start" while no serial ever appeared. `start_avd` now
+  detects the truncated signature up front, quarantines the bad snapshot
+  (renamed to `ram.bin.corrupt-<timestamp>` — recoverable, never deleted) and
+  boots cold directly.
+- **Stale crash locks.** `multiinstance.lock` and `hardware-qemu.ini.lock`
+  from a hard-killed emulator could make the next launch exit instantly.
+  They are cleared before every start (only when the AVD is not running).
+- **One honest retry.** If a quickboot still fails, the job retries once with
+  `--cold` inside its own background thread before reporting an error — and
+  every state transition lands in the job log.
+- **Malformed JSON bodies now fail honestly.** `jread` used to swallow parse
+  errors and hand routes an empty body, so a bad request answered
+  "no device selected — Quickboot an AVD first". It now answers `400 invalid
+  JSON body: <error class>`.
+- **Phantom AVD rows gone.** The AVD list merged raw `android emulator list`
+  output *including stderr*, so a transient `Unable to …` warning once
+  rendered a fake "Unable" device on the dashboard. CLI-reported names now
+  merge only when the AVD actually exists on disk.
+- **Uninstall by package name** — new field + button in the Installed apps
+  panel header, for uninstalling without scrolling the package list (the per
+  -app ✕ button and Smart Archive 📦 were already there).
+- **304 → 315 unittests** (new `tests/test_v512.py` + malformed-JSON and
+  phantom-AVD cases);
+  the whole flow was verified live against a booted Pixel Tablet AVD:
+  quarantine → cold boot → ready in 37 s → install via
+  `android install (delta)` → launch → uninstall.
+
+## v5.1.1 — dead-surface cleanup
+
+A dead-code audit across the agent, dashboard, tests and docs removed API
+surface with **zero callers anywhere** — not in the dashboard JS, not in the
+agent-skill file, not in the docs:
+
+- Removed routes: `GET /api/apps/info`, `GET /api/avds/window`,
+  `GET /api/refresh-rates`, `GET /api/smoothness/renderer` (the renderer kind
+  is already inside every `/api/smoothness` sample), `GET /api/ai/nnapi`
+  (NNAPI detail is already inside `/api/ai`), `POST /api/ai/interpret`
+  (use `/api/ai/command`), `POST /api/shared/delete-pc` and
+  `POST /api/shared/delete-device` (use `/api/shared/delete`).
+- Removed the `/api/sync-tap` v1 back-compat shim and its `sync_tap()`
+  wrapper — `/api/sync-input` is the generalised synchronizer.
+- Removed the now-unreachable `APPS.package_info` and `WIN.window_state`
+  functions; the window roundtrip test asserts `emulator-user.ini` directly.
+- Nothing the dashboard or the agent-skill file uses changed. **304 unittests
+  pass** — one test was deleted together with the code it pinned, and three
+  new route-surface consistency tests (`tests/test_surface.py`) now pin the
+  contract in BOTH directions: every agent route must keep a real consumer
+  (dashboard JS / agent-skill file / README), and every JS call must exist on
+  the agent — dead endpoints and stale frontend calls now fail the suite
+  instead of accumulating. pyflakes clean, smoke-tested on port 8124.
+
+## v5.1.0 — the Nov 2026 audit + competitive refresh
 
 A second full audit (three parallel review passes: bugs, security, dead code)
 plus fresh competitive research (BlueStacks Desktop/16, LDPlayer 14, MuMu
@@ -396,8 +463,8 @@ test in `tests/test_v4.py`.
 - **Live HTTP proxy** (set/clear with verification) and **wireless ADB**
   (`adb tcpip` + guest IP reported).
 - **Multi-instance synchronizer upgraded** — mirror tap *or* swipe *or* text
-  *or* key to all instances in parallel (`/api/sync-input`; old
-  `/api/sync-tap` still works).
+  *or* key to all instances in parallel (`/api/sync-input`; the old
+  `/api/sync-tap` v1 shape was removed in v5.1.1).
 - **Macros with loops** — repeat N × with a pause between passes
   (farm-choreography shaped).
 
@@ -471,7 +538,7 @@ guest, the render path, and the host, then names the bottleneck.
 - **Auto-tunes** the AVD: 4 vCPU ceiling, ≥4 GB RAM floor for API 37+,
   `hw.gpu.mode=auto`, `fastboot.forceColdBoot=no`, heap aware of RAM.
 - Keeps a 120-sample rolling history for the dashboard sparkline.
-- Endpoints: `GET /api/smoothness{,/diagnose,/history,/renderer}`,
+- Endpoints: `GET /api/smoothness{,/diagnose,/history}`,
   `GET /api/tune`, `POST /api/tune/apply`.
 
 ### AI layer (`core/ai.py`)
@@ -567,3 +634,13 @@ curl http://localhost:8080/api/ai
 
 Lint (dev-only venv, not needed to run): `pip install pyflakes` →
 `python -m pyflakes novadroid.py core/*.py tests/*.py` should be silent.
+
+## Author
+
+**Manjay Dangol** — architecture, engineering and research.
+
+## License
+
+Released under the [MIT License](LICENSE): free to use, copy, modify, merge,
+publish, distribute, sublicense and sell — attribution preserved, warranty
+disclaimed.

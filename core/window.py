@@ -111,34 +111,6 @@ def user_ini(name: str) -> Path:
     return avd_dir(name) / "emulator-user.ini"
 
 
-def window_state(name: str) -> dict:
-    from . import inifile
-    # v4 passed the raw `?name=` into avd_dir(): `../../foo` let a caller read
-    # any `.ini` on the machine. The route is read-only, but that is still an
-    # information disclosure — and fix_window() below could WRITE to it.
-    if not safe.valid_avd_name(name):
-        return {"ok": False, "avd": name,
-                "err": "invalid AVD name (letters, digits, . _ - only)"}
-    try:
-        kv = inifile.parse(user_ini(name))
-    except (ValueError, OSError):
-        return {"ok": False, "avd": name, "err": "invalid AVD name"}
-    info: dict = {"ok": True, "avd": name, "ini_exists": bool(kv),
-                  "x": kv.get("window.x"), "y": kv.get("window.y")}
-    left, top, right, bottom = work_area()
-    info["screen"] = f"{right - left}x{bottom - top}"
-    info["work_area"] = f"{left},{top} {right}x{bottom - top}"
-    try:
-        x = int(float(info["x"])) if info["x"] not in (None, "") else None
-        y = int(float(info["y"])) if info["y"] not in (None, "") else None
-        # Off-screen means: no title bar reachable, or pushed past the edges.
-        info["offscreen"] = (x is not None and (x < left - 8 or x > right - 80)) or \
-                            (y is not None and (y < top - 8 or y > bottom - 40))
-    except (TypeError, ValueError):
-        info["offscreen"] = False
-    return info
-
-
 def reset_saved_position(name: str, x: int | None = None, y: int | None = None) -> dict:
     """Rewrite saved window coords. AVD must be STOPPED for this to stick."""
     from . import inifile

@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core import inifile  # noqa: E402
 from core import window as WIN  # noqa: E402
 
 
@@ -35,17 +36,18 @@ class TestWindow(unittest.TestCase):
                 avd.mkdir(parents=True)
                 r = WIN.reset_saved_position("fake")
                 self.assertTrue(r["ok"])
-                st = WIN.window_state("fake")
-                self.assertFalse(st["offscreen"])
-                self.assertEqual(st["x"], str(r["x"]))
+                kv = inifile.parse(avd / "emulator-user.ini")
+                self.assertEqual(int(float(kv["window.y"])), WIN.center_for()[1])
+                self.assertGreaterEqual(int(float(kv["window.x"])), 0)
                 # simulate the bug: saved while hanging off the top
                 ini = avd / "emulator-user.ini"
                 ini.write_text("window.x=500\nwindow.y=-400\n", encoding="utf-8")
-                st2 = WIN.window_state("fake")
-                self.assertTrue(st2["offscreen"], "negative y must flag offscreen")
-                # fix heals it, idempotently
+                # reset heals it, idempotently
                 WIN.reset_saved_position("fake")
                 WIN.reset_saved_position("fake")
+                kv2 = inifile.parse(ini)
+                self.assertGreaterEqual(int(float(kv2["window.y"])), 0,
+                                        "negative y must heal to an on-screen spot")
                 text = ini.read_text(encoding="utf-8")
                 self.assertEqual(text.count("window.y="), 1)
             finally:

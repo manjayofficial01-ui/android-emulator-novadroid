@@ -856,6 +856,16 @@ $('#btn-archived').onclick = async () => {
     box.appendChild(el);
   });
 };
+$('#btn-uninstall').onclick = async () => {
+  const pkg = $('#uninstall-pkg').value.trim();
+  if (!pkg) return errT('Enter a package name — copy one from the list below.');
+  if (!needDev()) return;
+  if (!confirm(`Uninstall ${pkg}? Its data is wiped from the device.`)) return;
+  const d = await safeApi('POST', '/api/apps/uninstall', {serial: dev(), package: pkg});
+  d.ok ? okT(`${pkg} uninstalled${d.via ? ' (' + d.via + ')' : ''}.`, 'Uninstall')
+       : errT('Uninstall failed: ' + (d.log || d.err || ''));
+  if (d.ok) { $('#uninstall-pkg').value = ''; loadApps(); }
+};
 $('#btn-apps').onclick = loadApps;
 $('#app-filter').oninput = renderApps;
 $('#app-scope').onchange = loadApps;

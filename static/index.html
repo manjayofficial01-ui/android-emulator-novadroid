@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>NovaDroid — Android Emulator for Windows</title>
-<link rel="stylesheet" href="/styles.css?v=510">
+<link rel="stylesheet" href="/styles.css?v=512">
 </head>
 <body>
 <header class="topbar">
@@ -295,6 +295,10 @@
           <button id="btn-apps" class="btn small">↻ Load</button>
           <button id="btn-archived" class="btn small" title="Smart App Archive (BlueStacks 16-class): remove the APK, keep the data — reinstall restores the app with its state">📦 Archived</button>
         </div>
+        <div class="row">
+          <input id="uninstall-pkg" placeholder="com.example.app — uninstall by package name" title="Uninstall any package without scrolling the list (system apps are removed for user 0 only)">
+          <button id="btn-uninstall" class="btn small danger" title="Uninstall the package named on the left — its data is wiped">🗑 Uninstall</button>
+        </div>
         <div id="apps" class="list tall"></div>
       </div>
       <div>
@@ -555,6 +559,6 @@ Backup zips the whole instance into NovaDroid-Shared\Backups — stop the AVD fi
 <footer>Engine: Google Android Emulator (QEMU ranchu · gfxstream · WHPX) · Manager: NovaDroid <span id="agent-v">5.1</span> · No ads · Android 16/17 images · <span id="sdk"></span></footer>
 <div id="toast-root" class="toast-root"></div>
 <div id="dropveil" class="dropveil hidden"><div>⬇ Drop APK to install on <b id="drop-target">device</b></div></div>
-<script src="/app.js?v=510"></script>
+<script src="/app.js?v=512"></script>
 </body>
 </html>

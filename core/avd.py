@@ -116,19 +116,32 @@ def list_avds(paths: ToolPaths) -> dict:
     r = {"ok": False, "out": "", "err": "no AVD listing tool available"}
     if paths.android_cli:
         r = run([paths.android_cli, "emulator", "list"], timeout=60)
+        home = avd_home()
         for line in (r["out"] + "\n" + r["err"]).splitlines():
             name = line.strip().split()[0] if line.strip() else ""
             if not name or name.startswith(("-", "Available", "Usage", "No ")):
+                continue
+            # The CLI's stderr rides along here: a transient "Unable to …"
+            # warning once rendered a phantom "Unable" AVD row on the
+            # dashboard. The disk scan is the ground truth — merge a CLI name
+            # only when the AVD actually exists on disk.
+            if not ((home / f"{name}.ini").is_file()
+                    or (home / f"{name}.avd").is_dir()):
                 continue
             if re.fullmatch(r"[\w.\-]+", name):
                 names.add(name)
     elif paths.emulator:
         # No `android` CLI: the emulator binary can list AVDs on its own.
         r = run([paths.emulator, "-list-avds"], timeout=45)
+        home = avd_home()
         for line in (r["out"] + "\n" + r["err"]).splitlines():
             name = line.strip()
-            if name and re.fullmatch(r"[\w.\-]+", name):
-                names.add(name)
+            if not name or not re.fullmatch(r"[\w.\-]+", name):
+                continue
+            if not ((home / f"{name}.ini").is_file()
+                    or (home / f"{name}.avd").is_dir()):
+                continue
+            names.add(name)
     if not names:
         return {"ok": False, "avds": [], "raw": r["out"][:500],
                 "err": "no AVDs found — create one above (or install the `android` CLI)"}
@@ -346,6 +359,62 @@ def remove_avd(paths: ToolPaths, name: str) -> dict:
 # --------------------------------------------------------------------------
 # Start / stop
 # --------------------------------------------------------------------------
+#: A real quickboot snapshot's ram.bin is gigabytes. A truncated one (crash or
+#: power loss mid-save) is a few hundred bytes, and restoring it fails with
+#: "Error -1 from the snapshot callback" — which, through `android emulator
+#: start`, looks like an eternal "waiting for the virtual device to fully
+#: start" while no serial ever appears. Quarantine and cold-boot instead.
+_SNAPSHOT_RAM_MIN_BYTES = 1 << 20
+
+
+def quarantine_bad_snapshot(paths: ToolPaths, name: str) -> str:
+    """Move a truncated quickboot snapshot aside. Returns a note or "".
+
+    Never deletes: the file is renamed to `ram.bin.corrupt-<timestamp>` so it
+    stays recoverable, and the next boot falls back to a clean cold boot.
+    """
+    if not safe.valid_avd_name(name):
+        return ""
+    try:
+        ram = avd_dir(name) / "snapshots" / "default_boot" / "ram.bin"
+        if not ram.is_file():
+            return ""
+        size = ram.stat().st_size
+        if size >= _SNAPSHOT_RAM_MIN_BYTES:
+            return ""
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        ram.rename(ram.with_name(f"ram.bin.corrupt-{stamp}"))
+        return (f"quarantined truncated quickboot snapshot (ram.bin was "
+                f"{size} bytes) — cold booting instead")
+    except OSError:
+        return ""
+
+
+def clear_stale_locks(paths: ToolPaths, name: str) -> str:
+    """Remove crash leftovers: `multiinstance.lock`, `hardware-qemu.ini.lock`.
+
+    A hard-killed emulator leaves these behind and the next launch can then
+    believe another instance is still running and exit instantly. Only safe
+    to call once start_avd has established the AVD is NOT running.
+    """
+    if not safe.valid_avd_name(name):
+        return ""
+    removed: list[str] = []
+    try:
+        base = avd_dir(name)
+        lock = base / "multiinstance.lock"
+        if lock.is_file():
+            lock.unlink()
+            removed.append("multiinstance.lock")
+        ini_lock = base / "hardware-qemu.ini.lock"
+        if ini_lock.is_dir():
+            shutil.rmtree(ini_lock, ignore_errors=True)
+            removed.append("hardware-qemu.ini.lock")
+    except OSError:
+        pass
+    return f"removed stale emulator locks: {', '.join(removed)}" if removed else ""
+
+
 def start_avd(paths: ToolPaths, name: str, cold: bool = False) -> dict:
     if not safe.valid_avd_name(name):
         return {"ok": False, "err": "invalid AVD name"}
@@ -356,9 +425,19 @@ def start_avd(paths: ToolPaths, name: str, cold: bool = False) -> dict:
             existing = dict(_JOBS.get(name, {}))
         return {"ok": True, "already": True, "job": existing,
                 "note": f"{name} is already running."}
+    # A truncated snapshot or a crash leftover lock would doom the boot before
+    # it starts; heal both up front and skip the doomed quickboot.
+    fix_note = quarantine_bad_snapshot(paths, name)
+    lock_note = clear_stale_locks(paths, name)
+    if fix_note:
+        cold = True
     cmd = [paths.android_cli, "emulator", "start", name] + (["--cold"] if cold else [])
-    job = {"state": "starting", "mode": "cold" if cold else "quickboot",
+    job = {"state": "starting", "mode": "cold" if "--cold" in cmd else "quickboot",
            "t0": time.time(), "elapsed_s": 0.0, "booted": False, "log": ""}
+    if fix_note:
+        job["log"] = fix_note + (f" | {lock_note}" if lock_note else "")
+    elif lock_note:
+        job["log"] = lock_note
     with _JOBS_LOCK:
         _JOBS[name] = job
 
@@ -368,39 +447,61 @@ def start_avd(paths: ToolPaths, name: str, cold: bool = False) -> dict:
         with _JOBS_LOCK:
             _JOBS[name] = job
 
-    def _done(res: dict):
-        job["log"] = ((res.get("out") or "") + (res.get("err") or ""))[-2000:]
-        if not res.get("ok"):
-            _commit("error")
-            return
-        # The CLI exits as soon as it has spawned QEMU — that is NOT a booted
-        # device. Follow through to a real boot_completed so the dashboard
-        # never shows "ready" on a black screen.
+    def _log_cli_output(res: dict) -> None:
+        """Diagnostic only: append the CLI's output whenever it exits.
+
+        It can outlive the spawn by a long time: QEMU inherits the CLI's
+        stdout/stderr pipe handles, so a blocking `run()` on the CLI would
+        hang until the emulator dies — the latent bug that pinned healthy
+        boots at "starting" for the full 30-minute timeout. Spawn and FOLLOW
+        the device instead; never wait on the CLI process.
+        """
+        cli = ((res.get("out") or "") + (res.get("err") or ""))[-1000:]
+        if cli.strip():
+            with _JOBS_LOCK:
+                job["log"] = (job.get("log", "") + " | cli: " + cli)[-2000:]
+
+    def _follow_up(spawned_cmd: list[str]) -> str:
+        """Wait for a serial, then boot_completed. 'ready'|'retry'|'fail'."""
         _commit("booting")
-        try:
-            serial = _await_serial(paths, name, timeout=300)
-            if not serial:
-                job["log"] = (job.get("log", "") + " | no serial appeared").strip()
-                _commit("error")
-                return
+        serial = _await_serial(paths, name, timeout=300)
+        if serial:
             job["serial"] = serial
             from . import apps as APPS
             res2 = APPS.wait_boot(paths, serial, timeout=600)
             job["booted"] = bool(res2.get("booted"))
-            if not job["booted"]:
-                job["log"] = (job.get("log", "") + " | "
-                              + str(res2.get("err", ""))).strip()
-            _commit("ready" if job["booted"] else "error")
-        except Exception as ex:
-            # Any exception here used to leave the job pinned at "booting"
-            # forever. Surface it and terminate the state machine honestly.
-            job["log"] = (job.get("log", "") +
-                          f" | boot watch failed: {type(ex).__name__}").strip()
-            job["booted"] = False
-            _commit("error")
+            if job["booted"]:
+                _commit("ready")
+                return "ready"
+            job["log"] = (job.get("log", "") + " | "
+                          + str(res2.get("err", ""))).strip()[-2000:]
+            return "fail"
+        job["log"] = (job.get("log", "") + " | no serial appeared").strip()[-2000:]
+        return "fail" if "--cold" in spawned_cmd else "retry"
 
-    run_in_background(cmd, _done, timeout=1800)
-    mode = "cold boot (no snapshot)" if cold else "quickboot snapshot"
+    def _done(_cli_res: dict | None = None) -> None:
+        try:
+            if _follow_up(cmd) == "ready":
+                return
+            if "--cold" in cmd:
+                return      # cold was already the plan; the log says why
+            job["log"] = (job.get("log", "") +
+                          " | quickboot failed — retrying with a cold boot"
+                          ).strip()[-2000:]
+            _commit("retrying-cold")
+            retry = [paths.android_cli, "emulator", "start", name, "--cold"]
+            run_in_background(retry, _log_cli_output, timeout=1800)
+            if _follow_up(retry) == "ready":
+                return
+        finally:
+            # Anything that is not a clean "ready" here is a failure — commit
+            # it so the job never sits at "booting"/"retrying" forever.
+            if job["state"] not in ("ready", "error"):
+                _commit("error")
+
+    run_in_background(cmd, _log_cli_output, timeout=1800)
+    threading.Thread(target=_done, daemon=True).start()
+    mode = "cold boot (no snapshot)" if "--cold" in cmd else "quickboot snapshot"
     return {"ok": True, "job": dict(job), "mode": mode,
             "note": ("First boot takes minutes (Play image provisioning); later "
                      "quickboots take seconds. Job state advances to 'ready' "
