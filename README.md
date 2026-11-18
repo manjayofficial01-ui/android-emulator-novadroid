@@ -6,6 +6,9 @@
 <div align="center">
   <img src="docs/screenshot-dashboard.png" alt="NovaDroid dashboard — Pixel Tablet AVD running under WHPX" width="860">
   <p><sub>NovaDroid 5.1.2 — Pixel Tablet AVD live on WHPX: fleet controls, live view, one-click APK install / launch / uninstall.</sub></p>
+  <br>
+  <img src="docs/screenshot-emulator.png" alt="The live Android emulator screen — Pixel Tablet home screen, Android 15" width="620">
+  <p><sub>What you actually see when it runs: the live Pixel Tablet guest (Android 15, Play images) — mirrored and controllable from the dashboard, or driven straight from the emulator window.</sub></p>
 </div>
 
 **Live dashboard:** https://novadroid-rho.vercel.app (static UI on Vercel —
